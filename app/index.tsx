@@ -6,10 +6,9 @@ export default function Index() {
   const userName = useSelector((state: RootState) => state.user.name);
   
  
-  if (userName) {
-    return <Redirect href="/(tabs)/home" />;
+  if (!userName) {
+    return <Redirect href="/(auth)" />;
   }
-  
   
   return <Redirect href="/(tabs)/home" />;
 }

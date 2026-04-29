@@ -11,17 +11,13 @@
     "ios": {
       "supportsTablet": true
     },
-    "router": {
-      "ignoreRouteFiles": [
-        "**/*.d.ts"
-      ]
-    },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.venky534.revork"
     },
     "web": {
       "bundler": "metro",
@@ -44,15 +40,9 @@
       "typedRoutes": true
     },
     "extra": {
-      "router": {},
       "eas": {
-        "projectId": "32d1adf3-d1eb-461f-9f81-b7452a340efc"
-      },
-      "sheetsUrl": "https://sheets.googleapis.com/v4/spreadsheets/",
-      "sheetId": "1Nw1IwdMRHZXUW2p5LIoOU8jdH1HIhH9_vBeCK-aNFy0",
-      "apiKey": "AIzaSyAmR8ud-iBbEArlcevO7fOy0DKSrT8CLCc",
-      "sheetName": "List",
-      "range='A1": "Z1000"
+        "projectId": "41f248fb-e312-4246-bd9b-d9454ef7e86e"
+      }
     },
     "owner": "venky534"
   }

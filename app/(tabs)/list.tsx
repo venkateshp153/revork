@@ -50,7 +50,7 @@ export default function List() {
         message: `List of things we need at store:\n\n${generatedListText}`,
         title: "My Grocery List",
       });
-    } catch (error) {
+    } catch {
       Alert.alert("Error", "Failed to share the list");
     }
   };

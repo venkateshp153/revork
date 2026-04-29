@@ -1,4 +1,4 @@
-import { Tabs } from 'expo-router';
+import { Tabs, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { StyleSheet, Animated, View } from 'react-native';
 import { useRef } from 'react';
@@ -7,29 +7,22 @@ import { useSelector } from 'react-redux';
 import { RootState } from '@/redux/store';
 
 export default function TabLayout() {
+  const router = useRouter();
   const homeAnim = useRef(new Animated.Value(1)).current;
   const listAnim = useRef(new Animated.Value(1)).current;
   const userName = useSelector((state: RootState) => state.user.name);
 
-  const animateTab = (anim: Animated.Value) => {
-    Animated.sequence([
-      Animated.timing(anim, {
-        toValue: 0.92,
-        duration: 80,
-        useNativeDriver: true,
-      }),
-      Animated.spring(anim, {
-        toValue: 1,
-        friction: 5,
-        tension: 150,
-        useNativeDriver: true,
-      }),
-    ]).start();
-  };
-
   if (!userName) {
-    return null; // The auth layout will handle the redirect
+    router.replace('/(auth)');
   }
+
+  const animateTab = (anim: Animated.Value) => {
+    anim.setValue(0.92);
+    Animated.spring(anim, {
+      toValue: 1,
+      useNativeDriver: true,
+    }).start();
+  };
 
   return (
     <View style={styles.container}>

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -50,6 +50,15 @@ const HomeScreen = () => {
   const [showUsernameModal, setShowUsernameModal] = useState(false);
   const [currentTime, setCurrentTime] = useState("");
 
+  const fadeInItems = useCallback(() => {
+    fadeAnim.setValue(0);
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 500,
+      useNativeDriver: true,
+    }).start();
+}, [fadeAnim]);
+
   // Check if username exists on first render
   useEffect(() => {
     if (!userName) {
@@ -81,7 +90,7 @@ const HomeScreen = () => {
       dispatch(setItems(data));
       fadeInItems();
     }
-  }, [data, dispatch]);
+  }, [data, dispatch, fadeInItems]);
 
   useEffect(() => {
     dispatch(setLoading(sheetLoading));
@@ -93,20 +102,11 @@ const HomeScreen = () => {
     }
   }, [sheetError, dispatch]);
 
-  const fadeInItems = () => {
-    fadeAnim.setValue(0);
-    Animated.timing(fadeAnim, {
-      toValue: 1,
-      duration: 500,
-      useNativeDriver: true,
-    }).start();
-  };
-
   const handleRefresh = async () => {
     try {
       await refreshSheetData();
       fadeInItems();
-    } catch (err) {
+    } catch {
       dispatch(setError("Failed to refresh data"));
     }
   };
