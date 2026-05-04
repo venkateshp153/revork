@@ -5,9 +5,9 @@ import { GroceryItem } from '../types';
 
 export const useSheetData = (
   configKey?: string,
-  transformFn?: (data: any[]) => GroceryItem[] // Update return type
+  transformFn?: (data: any[]) => GroceryItem[]
 ) => {
-  const [data, setData] = useState<GroceryItem[]>([]); // Explicit type
+  const [data, setData] = useState<GroceryItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -19,13 +19,16 @@ export const useSheetData = (
         configKey,
         transformFn
       );
-      // Ensure the data matches GroceryItem type
-      const typedData = (result || []).map(item => ({
-        Id: item.Id || '',
-        GroceryItem: item.GroceryItem || '',
-        ...item
-      }));
-      setData(typedData);
+      
+      if (Array.isArray(result)) {
+        const typedData: GroceryItem[] = result.map(item => ({
+          Id: item.Id || '',
+          GroceryItem: item.GroceryItem || '',
+        }));
+        setData(typedData);
+      } else {
+        setData([]);
+      }
     } catch (err) {
       setError(err instanceof Error ? err : new Error('Unknown error'));
     } finally {

@@ -1,6 +1,7 @@
 //redux/store/grocerySlice.ts
 import { createSlice, PayloadAction, createSelector } from '@reduxjs/toolkit';
 import { GroceryItem, ListItem } from '@/assets/types';
+import { fetchSheetData } from '../sheetsApi';
 
 interface GroceryState {
   items: GroceryItem[];
@@ -68,6 +69,22 @@ const grocerySlice = createSlice({
     setHasHydrated(state, action: PayloadAction<boolean>) {
       state.hasHydrated = action.payload;
     }
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(fetchSheetData.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+      .addCase(fetchSheetData.fulfilled, (state, action) => {
+        state.loading = false;
+        state.items = action.payload;
+        state.error = null;
+      })
+      .addCase(fetchSheetData.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload as string;
+      });
   },
 });
 

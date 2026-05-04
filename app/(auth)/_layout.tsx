@@ -3,15 +3,19 @@ import { useSelector } from 'react-redux';
 import { RootState } from '@/redux/store';
 
 export default function AuthLayout() {
-  const userName = useSelector((state: RootState) => state.user.name);
+  const user = useSelector((state: RootState) => state.user);
   
-  if (userName) {
+  if (user.isAuthenticated && user.profile) {
     return <Redirect href="/(tabs)/home" />;
+  }
+
+  if (user.isAuthenticated && user.isNewUser) {
+    return <Redirect href="/profile-modal" />;
   }
 
   return (
     <Stack>
-      <Stack.Screen name="index" options={{ headerShown: false }} />
+      <Stack.Screen name="login" options={{ headerShown: false }} />
     </Stack>
   );
 }

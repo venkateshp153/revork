@@ -9,11 +9,14 @@ import { RootState } from '@/redux/store';
 export default function TabLayout() {
   const router = useRouter();
   const homeAnim = useRef(new Animated.Value(1)).current;
-  const listAnim = useRef(new Animated.Value(1)).current;
-  const userName = useSelector((state: RootState) => state.user.name);
+  const workersAnim = useRef(new Animated.Value(1)).current;
+  const analyticsAnim = useRef(new Animated.Value(1)).current;
+  const notificationsAnim = useRef(new Animated.Value(1)).current;
+  const profileAnim = useRef(new Animated.Value(1)).current;
+  const user = useSelector((state: RootState) => state.user);
 
-  if (!userName) {
-    router.replace('/(auth)');
+  if (!user.isAuthenticated || !user.profile) {
+    router.replace('/(auth)/login');
   }
 
   const animateTab = (anim: Animated.Value) => {
@@ -77,10 +80,52 @@ export default function TabLayout() {
             ),
           }}
         />
+        {user.profile?.designation !== 'worker' && (
+          <Tabs.Screen
+            name="workers"
+            listeners={{
+              tabPress: () => animateTab(workersAnim),
+            }}
+            options={{
+            tabBarLabel: ({ focused, color }) => (
+              <Animated.Text
+                style={[
+                  styles.label,
+                  {
+                    color,
+                    transform: [{ scale: focused ? workersAnim : 1 }],
+                    opacity: workersAnim.interpolate({
+                      inputRange: [0.92, 1],
+                      outputRange: [0.9, 1]
+                    })
+                  }
+                ]}
+              >
+                Workers
+              </Animated.Text>
+            ),
+            tabBarIcon: ({ focused, color }) => (
+              <Animated.View style={{
+                transform: [{ scale: workersAnim }],
+                opacity: workersAnim.interpolate({
+                  inputRange: [0.92, 1],
+                  outputRange: [0.95, 1]
+                })
+              }}>
+                <MaterialCommunityIcons
+                  name={focused ? 'account-group' : 'account-group-outline'}
+                  size={28}
+                  color={color}
+                />
+              </Animated.View>
+            ),
+          }}
+          />
+        )}
         <Tabs.Screen
-          name="list"
+          name="analytics"
           listeners={{
-            tabPress: () => animateTab(listAnim),
+            tabPress: () => animateTab(analyticsAnim),
           }}
           options={{
             tabBarLabel: ({ focused, color }) => (
@@ -89,27 +134,107 @@ export default function TabLayout() {
                   styles.label,
                   {
                     color,
-                    transform: [{ scale: focused ? listAnim : 1 }],
-                    opacity: listAnim.interpolate({
+                    transform: [{ scale: focused ? analyticsAnim : 1 }],
+                    opacity: analyticsAnim.interpolate({
                       inputRange: [0.92, 1],
                       outputRange: [0.9, 1]
                     })
                   }
                 ]}
               >
-                List
+                Analytics
               </Animated.Text>
             ),
             tabBarIcon: ({ focused, color }) => (
               <Animated.View style={{
-                transform: [{ scale: listAnim }],
-                opacity: listAnim.interpolate({
+                transform: [{ scale: analyticsAnim }],
+                opacity: analyticsAnim.interpolate({
                   inputRange: [0.92, 1],
                   outputRange: [0.95, 1]
                 })
               }}>
                 <MaterialCommunityIcons
-                  name={focused ? 'format-list-bulleted' : 'format-list-bulleted'}
+                  name={focused ? 'chart-bar' : 'chart-bar'}
+                  size={28}
+                  color={color}
+                />
+              </Animated.View>
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="notifications"
+          listeners={{
+            tabPress: () => animateTab(notificationsAnim),
+          }}
+          options={{
+            tabBarLabel: ({ focused, color }) => (
+              <Animated.Text
+                style={[
+                  styles.label,
+                  {
+                    color,
+                    transform: [{ scale: focused ? notificationsAnim : 1 }],
+                    opacity: notificationsAnim.interpolate({
+                      inputRange: [0.92, 1],
+                      outputRange: [0.9, 1]
+                    })
+                  }
+                ]}
+              >
+                Alerts
+              </Animated.Text>
+            ),
+            tabBarIcon: ({ focused, color }) => (
+              <Animated.View style={{
+                transform: [{ scale: notificationsAnim }],
+                opacity: notificationsAnim.interpolate({
+                  inputRange: [0.92, 1],
+                  outputRange: [0.95, 1]
+                })
+              }}>
+                <MaterialCommunityIcons
+                  name={focused ? 'bell' : 'bell-outline'}
+                  size={28}
+                  color={color}
+                />
+              </Animated.View>
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="profile"
+          listeners={{
+            tabPress: () => animateTab(profileAnim),
+          }}
+          options={{
+            tabBarLabel: ({ focused, color }) => (
+              <Animated.Text
+                style={[
+                  styles.label,
+                  {
+                    color,
+                    transform: [{ scale: focused ? profileAnim : 1 }],
+                    opacity: profileAnim.interpolate({
+                      inputRange: [0.92, 1],
+                      outputRange: [0.9, 1]
+                    })
+                  }
+                ]}
+              >
+                Profile
+              </Animated.Text>
+            ),
+            tabBarIcon: ({ focused, color }) => (
+              <Animated.View style={{
+                transform: [{ scale: profileAnim }],
+                opacity: profileAnim.interpolate({
+                  inputRange: [0.92, 1],
+                  outputRange: [0.95, 1]
+                })
+              }}>
+                <MaterialCommunityIcons
+                  name={focused ? 'account' : 'account-outline'}
                   size={28}
                   color={color}
                 />

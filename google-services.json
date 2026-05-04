@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "410003590123",
+    "project_id": "revork-e7d8a",
+    "storage_bucket": "revork-e7d8a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:410003590123:android:2232942ef544893ecfa7ae",
+        "android_client_info": {
+          "package_name": "com.venky534.revork"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "410003590123-s6gk4aoc4uh77u7eafs8l19d2v7api5n.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC_S4yNwN6OVgiHxSGmsbKeTjaWjVv5w0o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "410003590123-s6gk4aoc4uh77u7eafs8l19d2v7api5n.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,15 +1,15 @@
 //components/SheetDataView.tsx
 import React from 'react';
 import { View, Text, StyleSheet, FlatList, ActivityIndicator, RefreshControl } from 'react-native';
-import { SheetData } from '@/assets/config/sheets';
+import { GroceryItem } from '@/assets/types';
 
 interface SheetDataViewProps {
-  data: SheetData;
+  data: GroceryItem[];
   loading: boolean;
   error: Error | null;
   onRefresh?: () => Promise<void>;
-  renderItem?: (item: any) => React.ReactElement;
-  keyExtractor?: (item: any, index: number) => string;
+  renderItem?: (item: GroceryItem) => React.ReactElement;
+  keyExtractor?: (item: GroceryItem, index: number) => string;
   emptyComponent?: React.ReactElement;
   errorComponent?: (error: Error) => React.ReactElement;
 }

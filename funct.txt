@@ -1,0 +1,491 @@
+
+1. Splash Screen
+Build a React Native Splash screen component named SplashScreen.
+
+- Use SafeAreaView as root wrapper with flex: 1 and background color from theme (e.g. #1A1A2E or your brand color).
+- Center the app logo (Image component) both vertically and horizontally using justifyContent: 'center' and alignItems: 'center'.
+- Set logo opacity to 0.85.
+- No header, no status bar content (use StatusBar hidden={true}).
+- Use useEffect with setTimeout of exactly 3000ms.
+- On timeout: call navigation.replace('Login') — NOT navigate() — so Android back button cannot return to splash.
+- Cleanup: return clearTimeout inside useEffect cleanup function to prevent memory leaks.
+- No spinner, no loading text. Just logo and background.
+
+2. Login Screen
+Build a React Native LoginScreen component with three vertically stacked auth sections inside a KeyboardAvoidingView (behavior: 'padding' on iOS, 'height' on Android) wrapped in a ScrollView.
+
+SECTION 1 — Join via Link (Worker access):
+- Label: "Join a Company Team"
+- TextInput with placeholder "Paste join link here..." stored in local state joinLink.
+- Inline row (flexDirection: 'row'): TextInput flex 1, then "Join" Button.
+- Button is DISABLED (opacity 0.4, pointerEvents none) when joinLink.trim() is empty.
+- On press:
+  1. Parse URL using Linking or URL constructor: extract sheetId, token, companyId params.
+  2. If params missing → show inline error "Invalid or expired link".
+  3. Make a read-only GET request to the Google Sheet using the token.
+  4. If response is non-200 or empty → show inline error "Link not recognized. Please check with your admin."
+  5. If success → store raw response data in a local ref (do NOT dispatch to Redux yet).
+  6. Show a Modal (WorkerVerifyModal) with three inputs: Name, Phone, Email.
+  7. On "Verify" button press inside modal: check if entered phone AND email match the fetched row data (case-insensitive, trimmed). Name is informational only.
+  8. If match → dispatch fetched worker profile to Redux userSlice, navigate.replace('Tabs').
+  9. If no match → show red inline error inside modal: "Details don't match. Please check with your admin."
+  10. Company name from sheet response → store in Redux and display top-center on Home screen.
+
+SECTION 2 — Email / Password (Admin/Manager access):
+- Label: "Manage Your Company"
+- TextInput for email: validate with regex /^[^\s@]+@[^\s@]+\.[^\s@]+$/ on change.
+- TextInput for password: secureTextEntry={true}, validate: minimum 8 chars, at least one number.
+- Show inline red validation messages below each input as user types (not on submit).
+- "Login" button: disabled until BOTH inputs pass regex validation.
+- On press:
+  1. Call Firebase Auth signInWithEmailAndPassword(email, password).
+  2. On success → call checkIfNewUser(uid). If new → show NewUserProfileModal. If existing → dispatch profile to Redux → navigate.replace('Tabs').
+  3. On Firebase error auth/user-not-found or auth/wrong-password → show "Incorrect email or password."
+  4. On error auth/email-already-in-use → show "This email is already linked to another account."
+  5. If user tries to sign up and email/phone already exists → Firebase returns error → show "An account with this email or phone already exists. Try a different one."
+
+SECTION 3 — Google OAuth:
+- Single "Continue with Google" button with Google logo icon.
+- Use @react-native-google-signin/google-signin (configure in app entry point with your webClientId).
+- On press:
+  1. Call GoogleSignin.signIn() → get idToken.
+  2. Credential via firebase.auth.GoogleAuthProvider.credential(idToken).
+  3. Sign in with Firebase using signInWithCredential.
+  4. Call checkIfNewUser(uid): if new → open NewUserProfileModal with name and email pre-filled from Google profile. If existing → dispatch to Redux → navigate.replace('Tabs').
+  5. If Firebase returns error that email is linked to a different provider → show "This email is already used with a different sign-in method."
+
+DIVIDERS:
+- Between each section render a centered "(or)" text in muted color with a horizontal line on each side (use flexDirection: 'row' with View flex 1 height 1 backgroundColor '#ccc').
+
+checkIfNewUser(uid) helper:
+- Query Firestore users/{uid}. If document does not exist → return true (new). If exists → dispatch profile data to Redux → return false.
+
+3. New User Profile Modal (Admin Only)
+Build a React Native Modal component named NewUserProfileModal.
+
+- Modal props: visible={isVisible} animationType="slide" transparent={false}.
+- CRITICAL: set onRequestClose to do nothing (empty function). Do NOT allow dismiss on outside tap. Remove any TouchableWithoutFeedback dismiss wrapper.
+- Top-right "✕" IconButton: on press show an Alert "Your account has not been created. Exit app?" with Cancel and Exit App buttons. Exit App calls BackHandler.exitApp() on Android and RNExitApp or Linking.openURL('') equivalent on iOS.
+
+FORM FIELDS (all in a ScrollView):
+- Name: TextInput pre-filled from auth provider, editable, required.
+- Email: TextInput pre-filled, editable, required, email regex validation.
+- Designation: static Text showing "Admin" — not editable (new users via this flow are always Admin).
+- Company Name *: required, red asterisk in label, empty check on save.
+- Company Address: optional — label shows "(optional)" in muted text.
+- Company Phone *: required, numeric keyboard, regex /^[0-9]{7,15}$/.
+- Company Email *: required, email regex.
+
+Show a red helper text below each required field if left empty on save attempt.
+
+SAVE BUTTON:
+- On press:
+  1. Validate all required fields. If any fail → highlight them, do not proceed.
+  2. Dispatch complete profile object to Redux userSlice: { uid, name, email, designation: 'admin', companyName, companyAddress, companyPhone, companyEmail, createdAt: Date.now() }.
+  3. POST same object to the 'MyProfile' tab of Google Sheets via Sheets API (use sheetId from Redux once available — if not yet available, queue and send after step 4).
+  4. Show a full-screen loading overlay ("Setting up your workspace...") — do NOT navigate yet.
+  5. Await createGoogleDriveStructure(companyName, userToken) fully.
+  6. Only after that function resolves with { sheetId, folderId }: dispatch sheetId and folderId to Redux, save both to AsyncStorage.
+  7. Hide loading overlay, close modal, navigate.replace('Tabs').
+
+4. Google Drive & Sheets Setup Utility
+Create a utility file: src/utils/createGoogleDriveStructure.js
+
+Export an async function: createGoogleDriveStructure(companyName, accessToken)
+
+This function runs ONCE after new Admin profile is saved. Steps:
+
+1. FOLDER: POST to https://www.googleapis.com/drive/v3/files with Authorization: Bearer {accessToken}.
+   Body: { name: `${companyName} WorkForce Data`, mimeType: 'application/vnd.google-apps.folder' }
+   Store returned id as folderId.
+
+2. SPREADSHEET: POST to https://sheets.googleapis.com/v4/spreadsheets.
+   Body: { properties: { title: `${companyName} Records` }, sheets: [
+     { properties: { title: 'MyProfile' } },
+     { properties: { title: 'Workers' } },
+     { properties: { title: 'Clockings' } },
+     { properties: { title: 'DrawerMoney' } },
+     { properties: { title: 'Notifications' } },
+     { properties: { title: 'LeaveRequests' } },
+     { properties: { title: 'Shifts' } },
+     { properties: { title: 'AuditLog' } }
+   ]}
+   Store returned spreadsheetId as sheetId.
+
+3. Move spreadsheet into folder: PATCH https://www.googleapis.com/drive/v3/files/{sheetId}?addParents={folderId}&removeParents=root
+
+4. Write header rows to each sheet using batchUpdate:
+   - Workers: WorkerID, Name, Email, Phone, PayPerHour, Designation, JoinDate, Status
+   - Clockings: WorkerID, Name, Date, ClockIn, ClockOut, BreakMins, HoursWorked, DayTotal
+   - DrawerMoney: WorkerID, Name, Date, DrawerAmount, Notes, PhotoURL
+   - Notifications: NotifID, Type, ToWorkerID, FromUID, Title, Body, Timestamp, Read, Status
+   - LeaveRequests: RequestID, WorkerID, Name, StartDate, EndDate, Reason, Type, CoveringWorker, Status, ReviewedBy, ReviewedAt
+   - Shifts: ShiftID, WorkerID, Name, Date, StartTime, EndTime, AssignedBy
+   - AuditLog: LogID, Timestamp, UserID, UserName, Action, TargetSheet, RowID, OldValue, NewValue
+
+5. Set sharing permissions:
+   - Admin (current user email): role 'writer', type 'user' via Drive Permissions API.
+   - Default sheet is private. Manager and Worker access granted later by Admin.
+
+6. Generate join link base:
+   - PATCH Drive file permissions to add a 'reader' link share: { role: 'reader', type: 'anyone', withLink: true }
+   - GET the sharing URL from Drive API response.
+   - Construct deep link: workforce://join?sheetId={sheetId}&token={sharingToken}&companyId={uid}
+   - Store link in Redux state.user.joinLink and write to MyProfile sheet row.
+
+7. Return { sheetId, folderId, joinLink }.
+
+IMPORTANT: Wrap entire function in try/catch. On any step failure, log to console and rethrow with a descriptive message. The caller (NewUserProfileModal) will catch and show an error alert with a "Retry" button.
+
+5. Role-Based Dashboard (Home Tab)
+Build RoleBasedDashboard component. Read designation from Redux: state.user.designation.
+
+SHARED TOP BAR (all roles):
+- Company name centered in header (from Redux state.user.companyName).
+- Role badge (pill shape) top-right showing designation in color: Admin=blue, Manager=orange, Worker=green.
+
+IF designation === 'admin':
+
+Summary cards row (horizontal ScrollView):
+- Total Workers (count of Workers sheet rows).
+- Total Hours This Week (sum of HoursWorked in Clockings filtered to current ISO week).
+- Estimated Payroll This Month (sum of each worker's hours × their PayPerHour).
+- Active Now badge count (workers with today ClockIn but no ClockOut yet).
+
+Worker Status List (FlatList):
+- Each row: worker name, designation, today ClockIn time, ClockOut time or "Still Clocked In" badge.
+- Status logic: if no Clockings row for today → show "Day Off". If LeaveRequests has approved row for today → show "On Leave" in amber. If ClockIn exists and no ClockOut → "Active" in green. If ClockIn + ClockOut both exist → show times.
+- Tapping row navigates to WorkerDetailScreen with workerId param.
+
+Birthday check: on component mount, compare today's date (day + month only) against each worker's JoinDate or a DOB field in Workers sheet. If match → POST a notification row to Notifications sheet with Type: 'birthday', ToWorkerID: that worker's ID, Title: 'Happy Birthday 🎂', Body: 'Wishing you a great day from the whole team!'. This triggers their notification badge.
+
+Generate Join Link button:
+- Opens GenerateJoinLinkModal (see screen 10).
+
+Revoke Link button:
+- Calls Drive API to remove current 'anyone with link' permission.
+- Re-shares with new link, updates Redux and Sheets.
+- Shows Alert "Old link is now invalid. New link generated."
+
+Create Schedule button:
+- Opens ShiftSchedulerModal: a monthly calendar grid where Admin can tap a worker + date cell and assign start/end times. Saves to Shifts sheet.
+
+IF designation === 'manager':
+- Same UI as Admin but ALL buttons are hidden (no Generate Link, no Revoke, no Create Schedule, no edit icons).
+- FlatList rows are not pressable for edit — they still navigate to WorkerDetailScreen but that screen shows read-only data.
+- Show a "View Only" banner below header.
+
+IF designation === 'worker':
+- Show only the current user's data.
+- Today card: ClockIn time / ClockOut time / Hours so far today / Pay earned today (hours × PayPerHour, Math.round(result * 100) / 100).
+- DrawerMoney card: today's drawer amount (fetch from DrawerMoney sheet filtered by WorkerID and today's date).
+- Clock In / Clock Out toggle button:
+  - If no ClockIn row for today → show "Clock In" button in green.
+  - If ClockIn exists and no ClockOut → show "Clock Out" button in red, and a "Break" button in amber.
+  - Break button records current time as BreakStart in a local state; on press again records BreakEnd and adds minutes to BreakMins in the Clockings row.
+  - On Clock Out: calculate HoursWorked = ((ClockOut - ClockIn) in minutes - BreakMins) / 60. DayTotal = Math.round((HoursWorked * PayPerHour) * 100) / 100. PATCH the Clockings row.
+- Drawer Count input: a TextInput + Submit button to record drawer money before clock-out. Disable Clock Out button until drawer is submitted.
+- Request Leave button: opens LeaveRequestModal (form: date range picker, type picker sick/holiday/personal, reason TextInput, covering worker picker from Workers list). On submit → POST to LeaveRequests sheet, POST notification row to Notifications for Admin.
+
+DATA CACHING RULE (apply to all roles):
+- On tab focus (useFocusEffect): check if Redux cache timestamp is older than 5 minutes. Only re-fetch if stale or on explicit pull-to-refresh.
+- On every render: read from Redux cache only. Never call Sheets API on re-render.
+
+6. Workers List Tab
+Build WorkersListScreen component.
+
+ROLE GUARD: In your Tab.Navigator definition (not inside the screen), conditionally render this tab only when designation !== 'worker'. Example with React Navigation bottom tabs:
+  {designation !== 'worker' && <Tab.Screen name="Workers" component={WorkersListScreen} />}
+This prevents the tab from appearing at all for worker role, avoiding permission errors entirely.
+
+DATA FETCHING:
+- On mount and on pull-to-refresh: fetch 'Workers' sheet tab via Sheets API (values endpoint).
+- Store result in Redux workersSlice to cache it.
+- Show a loading skeleton (3–5 placeholder rows with animated shimmer) while first fetch is in progress.
+- Show error banner with "Retry" button if fetch fails.
+
+FLATLIST:
+- Each row: initials avatar (circle, color derived from name hash), worker name (bold), designation badge (colored pill), today's status badge (Active/Day Off/On Leave), and earnings this month (calculated: sum of HoursWorked in Clockings for this worker × PayPerHour, rounded).
+- Admin: each row has an edit pencil icon on the right. Tapping icon navigates to WorkerDetailScreen with editMode: true param.
+- Manager: rows are read-only, no edit icon.
+- Row press (both roles): navigate to WorkerDetailScreen with workerId param.
+
+Pull-to-refresh: RefreshControl on FlatList, re-fetches both Workers and Clockings sheets, updates Redux cache, resets cache timestamp.
+
+EARNINGS CALCULATION (shared helper function, use everywhere):
+  function calcMonthlyPay(clockingRows, payPerHour) {
+    const totalHours = clockingRows.reduce((sum, row) => sum + parseFloat(row.HoursWorked || 0), 0);
+    return Math.round((totalHours * payPerHour) * 100) / 100;
+  }
+
+7. Worker Detail Screen
+Build WorkerDetailScreen. Receives { workerId, editMode } from route.params.
+
+SECTION 1 — HEADER:
+- Initials avatar (large circle, first + last name initials, background color from name hash).
+- Worker name (h2), designation badge, company name.
+- If editMode === true and designation === 'admin': show "Edit" button top-right that toggles isEditing state.
+
+SECTION 2 — CLOCK IN/OUT HISTORY:
+- Month/Year picker (default: current month). Two Picker components (or a custom wheel) for Month and Year.
+- On picker change: filter Clockings sheet rows by WorkerID + selected month/year.
+- FlatList of daily rows: Date, ClockIn, ClockOut, BreakMins, HoursWorked, DayTotal (pay for that day).
+- Each row also shows a "Break" chip if BreakMins > 0.
+- If Admin is in edit mode: each row's ClockIn, ClockOut, BreakMins fields become tappable → opens inline TextInput. On blur: PATCH that row in Sheets and write to AuditLog.
+
+SECTION 3 — PAY DETAILS:
+- Pay Per Hour: if Admin editMode → editable TextInput, else Text. On save: PATCH Workers sheet row.
+- Hours worked this month (calculated from filtered Clockings rows).
+- Monthly total: Math.round((hoursThisMonth * payPerHour) * 100) / 100 — display with 2 decimal places always.
+
+SECTION 4 — DRAWER MONEY:
+- FlatList of DrawerMoney rows filtered by WorkerID for selected month.
+- Each row: date, amount, notes.
+- If Admin editMode: edit icon per row.
+
+SECTION 5 — ANALYTICS:
+- Bar chart (react-native-chart-kit BarChart): X axis = days of selected month, Y axis = HoursWorked. Show only days with data.
+- Summary stats in a 2×2 grid of cards: Avg Hours/Day | Total Hours | Total Pay | Total Break Time.
+- Attendance rate: (days with a Clockings row / working days in month) × 100, shown as a percentage with a progress bar.
+
+ROLE GUARD: Worker role can only reach this screen for their own workerId (check route.params.workerId === state.user.workerId on mount; if mismatch navigate.goBack()).
+
+8. Analytics / Dashboard Tab
+Build AnalyticsDashboardScreen. Wrap everything in a ScrollView.
+
+FOR ADMIN / MANAGER:
+Summary cards row (horizontal ScrollView, 4 cards):
+- Total Payroll This Month (sum across all workers).
+- Total Hours This Month.
+- Active Workers Today (workers with ClockIn today and no ClockOut).
+- Avg Hours Per Worker This Month.
+
+Filter bar: Three buttons — "Week" | "Month" | "Custom". Custom opens a date range picker (use @react-native-community/datetimepicker or a modal with two date pickers). Store selected range in local state. All charts re-compute on filter change.
+
+Charts (all from react-native-chart-kit):
+1. LineChart: total company hours per day over the selected date range. One data point per day.
+2. BarChart: per-worker hours comparison for selected period. One bar per worker (use worker initials as X label). Horizontal scroll if more than 6 workers.
+3. PieChart: proportion of total hours contributed by each worker. Legend below with worker names.
+
+FOR WORKER:
+- Monthly Pay Earned card (large, centered, formatted as currency).
+- HoursWorked breakdown: BarChart with one bar per day of current month.
+- Attendance rate: circular progress or progress bar.
+- Trend LineChart: hours per day over the last 28 days.
+
+DATA NOTE: All chart data is aggregated client-side from Redux cached Clockings rows. Do NOT make a new API call on every render. Compute inside useMemo with the filter range and Redux clockings array as dependencies.
+
+9. Notifications Tab
+Build NotificationsScreen.
+
+TAB BADGE: On mount and on tab focus, count Notifications sheet rows where ToWorkerID matches current user AND Read === 'false'. Dispatch count to Redux. Use that value to set the tab bar badge number via navigation.setOptions or the badge prop on Tab.Screen.
+
+FETCH: Read from Notifications sheet filtered by role:
+- Admin: fetch all rows.
+- Manager: fetch rows where Type is 'announcement' or 'leave_request'.
+- Worker: fetch rows where ToWorkerID === state.user.workerId.
+
+FlatList of notification cards:
+- Each card: icon (bell/calendar/dollar/user based on Type), title (bold), body preview (2 lines max), timestamp (relative: "2 hours ago"), unread dot (blue circle) if Read === 'false'.
+- On press: expand card to show full body. PATCH row in Notifications sheet: Read = 'true'. Remove unread dot. Decrement Redux badge count.
+
+FOR ADMIN:
+- Leave request cards show: worker name, date range, reason, covering worker, type badge, and two buttons: "Approve" (green) and "Reject" (red).
+  - On Approve: PATCH LeaveRequests row Status = 'approved', ReviewedBy = admin name, ReviewedAt = now. POST notification to worker: "Your leave from [start] to [end] has been approved."
+  - On Reject: same but Status = 'rejected'. POST rejection notification to worker.
+- Compose Announcement button (top right, plus icon): opens modal with Title input, Message input (multiline), Target picker (All Workers / specific worker from dropdown). On send: POST one Notifications row per target worker with Type: 'announcement'.
+
+SHIFT REMINDERS:
+- Use expo-task-manager + expo-background-fetch to run a background task daily at app startup.
+- Task logic: fetch worker's Shifts rows for today. For each shift: schedule an Expo local notification at (ClockIn time - 60 minutes) with message "Your shift starts in 1 hour." and another at (ClockOut time - 15 minutes) with "Time to wrap up your day."
+
+FOR WORKER — Leave Request form:
+- "Request Leave" button opens modal.
+- Fields: Start Date (date picker), End Date (date picker), Type (Picker: Sick / Holiday / Personal), Reason (multiline TextInput), Covering Worker (Picker from Workers sheet list — exclude self).
+- On submit: POST to LeaveRequests sheet (Status: 'pending'), POST notification row to Admin.
+- After submit: card appears in worker's Notifications list with status "Pending ⏳".
+
+10. Join Link Generation Modal (Admin)
+Build GenerateJoinLinkModal component. Only rendered for Admin role.
+
+Trigger: "Generate Join Link" button on Home tab.
+
+STEP 1 — Worker details form (animates down with LayoutAnimation.easeInEaseOut):
+- Name TextInput (required).
+- Phone TextInput (required, numeric).
+- Email TextInput (required, email regex).
+- Auto-generate WorkerID on input change: W + first 2 letters of name uppercased + last 4 digits of phone. Example: "WAL4321". Display as non-editable text below inputs.
+- "Generate Link" button: disabled until all 3 inputs pass validation.
+
+STEP 2 — On "Generate Link" press:
+1. Save worker details to 'Workers' sheet tab: POST new row with WorkerID, Name, Email, Phone, Status: 'pending', JoinDate: today.
+2. Retrieve the spreadsheet's sharing URL via Drive API (GET /drive/v3/files/{sheetId}?fields=webViewLink).
+3. Construct deep link: workforce://join?sheetId={SHEET_ID}&token={READ_TOKEN}&workerName={encodedName}&workerEmail={encodedEmail}&workerPhone={encodedPhone}&companyId={uid}
+4. Display in a copyable TextInput (editable={false}, selectTextOnFocus={true}).
+
+STEP 3 — Share options (three buttons):
+- "Share via SMS": Linking.openURL(`sms:?body=Join ${companyName} on WorkForce! Tap here to get started: ${link}`)
+- "Share via Email": Linking.openURL(`mailto:?subject=Join ${companyName} on WorkForce&body=Hi ${workerName},%0A%0AUse this link to join: ${link}`)
+- "Copy Link": Clipboard.setStringAsync(link) then show Toast/Snackbar "Link copied!"
+
+REVOKE & REGENERATE section:
+- "Revoke & Regenerate" button (red, outlined).
+- On press: Alert "This will invalidate the current join link for all pending workers. Continue?"
+- On confirm: 
+  1. Call Drive API DELETE /drive/v3/files/{sheetId}/permissions/{permissionId} to remove current anyone-with-link share.
+  2. Re-share with a new reader permission (type: 'anyone', role: 'reader', withLink: true).
+  3. Store new token in Redux and PATCH MyProfile sheet joinLink field.
+  4. Show Alert "Done. The old link is now invalid. New link ready to share."
+
+WORKER SIDE (Login Screen join flow):
+- Parse URL params from pasted link.
+- Fetch only: GET https://sheets.googleapis.com/v4/spreadsheets/{sheetId}/values/Workers?key={token}
+- Filter response rows client-side to find the row where Email matches the decoded workerEmail param.
+- If found → store that single row in a local ref, open WorkerVerifyModal.
+- Worker can ONLY see their own row — they never receive the full sheet data, just the filtered client-side result.
+
+Bug Fixes (Baked Into All Prompts Above)
+The following fixes are already embedded in each prompt above, but add these as explicit checks when reviewing your code:
+
+1. SPLASH BACK BUG: Every navigation from Splash must use navigation.replace(), never navigation.navigate(). Already specified above.
+
+2. MODAL DISMISSAL BUG: Every Modal component in this app must have onRequestClose={() => {}} (no-op) and must NOT be wrapped in a TouchableWithoutFeedback that calls onDismiss. Every modal must have a visible "✕" close button in top-right corner. Specified in screens 3 and 10.
+
+3. REDUX PERSISTENCE: Add this to your store setup file:
+   import { persistStore, persistReducer } from 'redux-persist';
+   import AsyncStorage from '@react-native-async-storage/async-storage';
+   Wrap your rootReducer with persistReducer({ key: 'root', storage: AsyncStorage, whitelist: ['user', 'workers', 'clockings'] }, rootReducer).
+   Wrap your App component with <PersistGate loading={null} persistor={persistStore(store)}>.
+
+4. DRIVE SETUP RACE CONDITION: Never navigate to Tabs until createGoogleDriveStructure() fully resolves. Show a blocking loading overlay. Specified in screen 3.
+
+5. SHEETS API QUOTA: Apply this pattern everywhere you fetch:
+   const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+   if (Date.now() - lastFetchedAt < CACHE_TTL) return; // skip fetch, use Redux cache
+   Use useFocusEffect (not useEffect) for tab screens so data only re-checks on tab visit.
+
+6. PAY CALCULATION: Use Math.round((hours * rate) * 100) / 100 everywhere. Never display raw floating point. Already in all pay calculation sections above.
+
+7. TAB VISIBILITY: Worker tab guard must be at the navigator level:
+   {designation !== 'worker' && <Tab.Screen name="Workers" component={WorkersListScreen} />}
+   Never rely only on an in-screen role check.
+
+8. JOIN LINK TOKEN: Build revoke flow from day one (screen 10 above). Never assume a Google share link is invalidated automatically.
+
+Additional Implementations Suggested
+Build or integrate the following enhancements. Add them after core screens are functional.
+
+HIGH PRIORITY:
+
+A. OFFLINE MODE:
+   - Install @react-native-async-storage/async-storage.
+   - After every successful Sheets API fetch, write the response to AsyncStorage with a key like 'cache_workers', 'cache_clockings', etc.
+   - On app start, load AsyncStorage cache into Redux before any API call.
+   - Show a yellow "Offline — showing cached data" banner using NetInfo from @react-native-community/netinfo when isConnected === false.
+
+B. PUSH NOTIFICATIONS:
+   - Install expo-notifications.
+   - On Admin approve/reject leave: call a Supabase Edge Function or Vercel serverless function that uses Expo Push API to send a push notification to the worker's Expo push token.
+   - Store each worker's push token in their Workers sheet row on first app launch (request permission, get token via Notifications.getExpoPushTokenAsync(), PATCH their row).
+   - Edge function endpoint: POST to https://exp.host/--/api/v2/push/send with { to: pushToken, title, body }.
+
+C. CLOCK-IN GEOFENCING:
+   - Install expo-location.
+   - Admin sets job site coordinates in their profile (lat/lng fields in MyProfile sheet).
+   - On worker Clock In press: call Location.getCurrentPositionAsync(). Calculate distance to job site using Haversine formula helper. If distance > 200 meters: show Alert "You must be at the job site to clock in." and block the clock-in POST.
+   - Helper function:
+     function haversineDistance(lat1, lon1, lat2, lon2) {
+       const R = 6371000;
+       const dLat = (lat2 - lat1) * Math.PI / 180;
+       const dLon = (lon2 - lon1) * Math.PI / 180;
+       const a = Math.sin(dLat/2)**2 + Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLon/2)**2;
+       return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+     }
+
+D. APPS SCRIPT MIDDLEWARE (strongly recommended):
+   - Instead of calling Sheets/Drive API directly from the app (which exposes bearer tokens in JS bundles), deploy a Google Apps Script Web App as a REST API.
+   - The script receives requests with a secret API key (stored in Apps Script Properties, not the app).
+   - The script performs all Sheets reads/writes server-side.
+   - App calls: POST https://script.google.com/macros/s/{SCRIPT_ID}/exec with { action: 'clockIn', workerId, time } etc.
+   - This also solves row-level access: the script filters data before returning it, so workers only ever receive their own rows.
+
+MEDIUM PRIORITY:
+
+E. BIOMETRIC LOCK:
+   - Install expo-local-authentication.
+   - After first login, prompt user to enable biometric lock (Alert).
+   - On subsequent app opens: if Redux has a valid session token and biometrics are enabled → call LocalAuthentication.authenticateAsync() before showing Tabs. If fails → show Login screen.
+   - Store biometricEnabled: true/false in AsyncStorage and Redux.
+
+F. CSV / PDF EXPORT:
+   - Install react-native-fs and react-native-share.
+   - On Analytics screen, add "Export" button (Admin only).
+   - CSV export: build a CSV string from Redux clockings data, write to RNFS.DocumentDirectoryPath + '/payroll_export.csv', share via RNShare.
+   - PDF export: use react-native-html-to-pdf — build an HTML string from the data, convert to PDF, share.
+
+G. SHIFT SCHEDULING TAB:
+   - Add a 'Shifts' tab (Admin/Manager only).
+   - Calendar grid: rows = workers, columns = days of selected month. Each cell = assigned shift time or empty.
+   - Admin taps empty cell → opens time picker modal for start/end time, saves to Shifts sheet.
+   - Worker sees their own Shifts tab (read-only) showing their assigned days and hours.
+   - Use react-native-calendars for the base calendar.
+
+H. DRAWER PHOTO RECEIPTS:
+   - In the Drawer Money entry form (worker side): add "Attach Photo" button.
+   - Use expo-image-picker to select from camera or gallery.
+   - Upload to Firebase Storage: storage().ref(`drawer/${workerId}/${date}.jpg`).putFile(localUri).
+   - Store the download URL in DrawerMoney sheet PhotoURL column.
+   - In Admin's drawer view: thumbnail image shown per row, tap to expand full screen.
+
+NICE TO HAVE:
+
+I. DARK MODE:
+   - Create a ThemeContext with light and dark token sets.
+   - Use useColorScheme() from react-native to detect system preference on startup.
+   - Allow manual override stored in AsyncStorage.
+   - All screens must reference theme tokens (colors.background, colors.text, etc.) not hardcoded hex values — enforce this from the start so dark mode is a theme swap not a rewrite.
+
+J. MULTI-COMPANY SUPPORT:
+   - Add a companyId field to Redux userSlice.
+   - Admin can create multiple companies (each gets its own Drive folder and Sheet).
+   - Add a company switcher dropdown in the header (visible to Admin only).
+   - All Sheets API calls include the active companyId's sheetId from Redux.
+
+K. AUDIT LOG:
+   - Every Admin edit to any sheet row must also POST a row to the AuditLog sheet: { LogID: uuid(), Timestamp: ISO string, UserID: uid, UserName: name, Action: 'edit'/'delete'/'create', TargetSheet: 'Workers', RowID: workerId, OldValue: JSON.stringify(before), NewValue: JSON.stringify(after) }.
+   - Create a helper: logAudit(action, targetSheet, rowId, oldValue, newValue) — call this inside every save/edit handler.
+   - AuditLog is write-only from the app. No screen displays it to users. It exists for accountability and recovery.
+
+L. YEARLY DATA RESET:
+   - On January 1st (check on app launch if lastResetYear in AsyncStorage !== current year):
+     1. Archive current Clockings, DrawerMoney, LeaveRequests, Notifications sheet data by copying to a new tab named e.g. 'Clockings_2024'.
+     2. Clear the live sheet tabs (delete rows below header).
+     3. Update lastResetYear in AsyncStorage and MyProfile sheet.
+   - Show Admin a confirmation alert before proceeding.
+
+
+
+
+
+
+   // Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyB_V3MpWF3Oc9hgQ08HwCNlKE--Bym7Cjc",
+  authDomain: "revork-e7d8a.firebaseapp.com",
+  projectId: "revork-e7d8a",
+  storageBucket: "revork-e7d8a.firebasestorage.app",
+  messagingSenderId: "410003590123",
+  appId: "1:410003590123:web:d1944ca0d1dfb6a8cfa7ae",
+  measurementId: "G-MC91M663RJ"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
