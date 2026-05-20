@@ -14,6 +14,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "410003590123-b98vbu2ioe0q6dvlfvbvaik3utuqlcnu.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.venky534.revork",
+            "certificate_hash": "1632701e571236d622a5b5313a6f5d6b7deb6f70"
+          }
+        },
+        {
           "client_id": "410003590123-s6gk4aoc4uh77u7eafs8l19d2v7api5n.apps.googleusercontent.com",
           "client_type": 3
         }
