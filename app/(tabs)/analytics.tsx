@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -29,15 +29,52 @@ interface Worker {
 
 export default function AnalyticsDashboardScreen() {
   const [filterType, setFilterType] = useState<'week' | 'month' | 'custom'>('month');
-  const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
+  const [workers, setWorkers] = useState<Worker[]>([]);
+  const [clockings, setClockings] = useState<Clocking[]>([]);
 
   const user = useSelector((state: RootState) => state.user);
-  const isAdmin = user.profile?.designation === 'admin';
-  const isManager = user.profile?.designation === 'manager';
   const isWorker = user.designation === 'worker' || user.workerProfile?.designation === 'worker';
 
-  const workers: Worker[] = [];
-  const clockings: Clocking[] = [];
+  useEffect(() => {
+    const fetchData = async () => {
+      const sheetId = user.sheetId || user.workerProfile?.sheetId;
+      if (!sheetId) return;
+
+      try {
+        const [workersRes, clockingsRes] = await Promise.all([
+          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Workers?key=${process.env.EXPO_PUBLIC_API_KEY}`),
+          fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Clockings?key=${process.env.EXPO_PUBLIC_API_KEY}`),
+        ]);
+
+        const workersData = await workersRes.json();
+        const clockingsData = await clockingsRes.json();
+
+        if (workersData.values) {
+          const headers = workersData.values[0];
+          const rows = workersData.values.slice(1).map((row: string[]) => {
+            const obj: any = {};
+            headers.forEach((h: string, i: number) => (obj[h] = row[i]));
+            return obj as Worker;
+          });
+          setWorkers(rows);
+        }
+
+        if (clockingsData.values) {
+          const headers = clockingsData.values[0];
+          const rows = clockingsData.values.slice(1).map((row: string[]) => {
+            const obj: any = {};
+            headers.forEach((h: string, i: number) => (obj[h] = row[i]));
+            return obj as Clocking;
+          });
+          setClockings(rows);
+        }
+      } catch (error) {
+        console.error('Error fetching analytics data:', error);
+      }
+    };
+
+    fetchData();
+  }, [user.sheetId, user.workerProfile?.sheetId]);
 
   const dateRange = useMemo(() => {
     const now = new Date();
@@ -49,12 +86,10 @@ export default function AnalyticsDashboardScreen() {
       start = new Date(now.setDate(diff));
     } else if (filterType === 'month') {
       start = new Date(now.getFullYear(), now.getMonth(), 1);
-    } else if (customRange) {
-      start = new Date(customRange.start);
     }
 
     return { start: start.toISOString().split('T')[0], end: now.toISOString().split('T')[0] };
-  }, [filterType, customRange]);
+  }, [filterType]);
 
   const filteredClockings = useMemo(() => {
     return clockings.filter((c) => c.Date >= dateRange.start && c.Date <= dateRange.end);
@@ -160,27 +195,28 @@ export default function AnalyticsDashboardScreen() {
       workerHours[c.WorkerID].hours += parseFloat(c.HoursWorked as string || '0');
     });
 
+    const chartColors = [
+      'rgba(0, 175, 91, 0.8)',
+      'rgba(33, 150, 243, 0.8)',
+      'rgba(255, 152, 0, 0.8)',
+      'rgba(156, 39, 176, 0.8)',
+      'rgba(244, 67, 54, 0.8)',
+      'rgba(0, 188, 212, 0.8)',
+      'rgba(255, 87, 34, 0.8)',
+      'rgba(121, 85, 72, 0.8)',
+      'rgba(96, 125, 139, 0.8)',
+      'rgba(233, 30, 99, 0.8)',
+    ];
+
     return Object.values(workerHours).map((w, index) => ({
       name: w.name,
       population: w.hours,
-      color: `rgba(${Math.random() * 255}, ${Math.random() * 255}, ${Math.random() * 255}, 0.8)`,
+      color: chartColors[index % chartColors.length],
       legend: w.name,
     }));
   }, [filteredClockings]);
 
-  const workerTodayData = useMemo(() => {
-    if (!isWorker) return null;
-    
-    const currentWorkerId = user.workerProfile?.workerId;
-    const today = new Date().toISOString().split('T')[0];
-    const todayClocking = clockings.find((c) => c.WorkerID === currentWorkerId && c.Date === today);
-    
-    const hoursWorked = todayClocking ? parseFloat(todayClocking.HoursWorked as string || '0') : 0;
-    const payPerHour = user.workerProfile?.payPerHour || 0;
-    const payEarned = Math.round((hoursWorked * payPerHour) * 100) / 100;
-    
-    return { hoursWorked, payEarned };
-  }, [clockings, user.workerProfile, isWorker]);
+
 
   const workerMonthlyData = useMemo(() => {
     if (!isWorker) return null;

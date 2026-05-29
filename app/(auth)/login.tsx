@@ -10,7 +10,6 @@ import {
   Alert,
   KeyboardAvoidingView,
   ScrollView,
-  Modal,
   StatusBar,
   Platform,
 } from 'react-native';
@@ -18,13 +17,12 @@ import { useRouter } from 'expo-router';
 import { useDispatch } from 'react-redux';
 import { setUserAuthenticated, setWorkerProfile } from '@/redux/store/userSlice';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { signInWithEmail, signInWithGoogle, checkOrCreateUser } from '@/assets/services/firebaseService';
+import { checkRevorkFolderExists, findSheetInFolder } from '@/src/utils/checkDriveFolder';
+import { signInWithEmail, signInWithGoogle, checkOrCreateUser, saveWorkerToTracking, updateCompanyTracking } from '@/assets/services/firebaseService';
 import WorkerVerifyModal from '@/components/WorkerVerifyModal';
 
 export default function LoginScreen() {
   const [joinLink, setJoinLink] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [workerVerifyVisible, setWorkerVerifyVisible] = useState(false);
   const [fetchedWorkerData, setFetchedWorkerData] = useState<any>(null);
@@ -32,11 +30,6 @@ export default function LoginScreen() {
   
   const router = useRouter();
   const dispatch = useDispatch();
-
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const passwordRegex = /^(?=.*[0-9]).{8,}$/;
-  const isEmailValid = emailRegex.test(email);
-  const isPasswordValid = passwordRegex.test(password);
 
   const handleJoinLink = async () => {
     if (!joinLink.trim()) {
@@ -112,7 +105,7 @@ export default function LoginScreen() {
     }
   };
 
-  const handleWorkerVerify = (name: string, phone: string, email: string) => {
+  const handleWorkerVerify = async (name: string, phone: string, email: string) => {
     if (!fetchedWorkerData) return;
 
     const phoneMatch = phone.trim().toLowerCase() === fetchedWorkerData.phone.trim().toLowerCase();
@@ -135,16 +128,58 @@ export default function LoginScreen() {
       companyId: fetchedWorkerData.companyId,
     }));
 
+    await saveWorkerToTracking({
+      workerId: fetchedWorkerData.workerId,
+      name: fetchedWorkerData.name,
+      email: fetchedWorkerData.email,
+      phone: fetchedWorkerData.phone,
+      companyId: fetchedWorkerData.companyId,
+      sheetId: fetchedWorkerData.sheetId,
+    });
+
     router.replace('/(tabs)/home');
   };
 
-  const checkIfNewUser = async (uid: string, email: string, name: string) => {
-    const userData = await checkOrCreateUser(uid, email, name);
+  const checkIfNewUser = async (uid: string, email: string, name: string, authProvider?: 'google' | 'email', photoURL?: string, accessToken?: string) => {
+    const userData = await checkOrCreateUser(uid, email, name, authProvider || 'email', photoURL);
     
-    if (userData.isNewUser) {
+    if (userData.isNewUser || !userData.folderId) {
       return true;
     }
-
+    
+    if (accessToken) {
+      try {
+        const folderCheck = await checkRevorkFolderExists(accessToken);
+        if (folderCheck.exists) {
+          const sheetId = await findSheetInFolder(accessToken, folderCheck.folderId);
+          if (sheetId) {
+            dispatch(setUserAuthenticated({
+              uid: userData.uid,
+              email: userData.email,
+              name: userData.name,
+              designation: userData.designation as 'admin' | 'manager' | 'worker',
+              companyName: userData.companyName,
+              companyAddress: userData.companyAddress,
+              companyPhone: userData.companyPhone,
+              companyEmail: userData.companyEmail,
+              sheetId: sheetId,
+              folderId: folderCheck.folderId,
+              isNewUser: false,
+            }));
+            
+            if (userData.companyName && sheetId) {
+              await updateCompanyTracking('company_' + userData.uid, uid, userData.companyName);
+            }
+            
+            router.replace('/(tabs)/home');
+            return false;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking drive for existing user:', error);
+      }
+    }
+    
     dispatch(setUserAuthenticated({
       uid: userData.uid,
       email: userData.email,
@@ -158,6 +193,11 @@ export default function LoginScreen() {
       folderId: userData.folderId,
       isNewUser: false,
     }));
+    
+    if (userData.companyName && userData.sheetId) {
+      await updateCompanyTracking('company_' + userData.uid, uid, userData.companyName);
+    }
+    
     router.replace('/(tabs)/home');
     return false;
   };
@@ -197,17 +237,21 @@ export default function LoginScreen() {
     console.log('Google Sign-In Result:', JSON.stringify(result, null, 2));
     
     if (result.success && result.user) {
+      const accessToken = result.googleUserInfo?.idToken; // Using idToken as access token for API calls
       const isNew = await checkIfNewUser(
         result.user.uid,
-        result.email || '',
-        result.name || ''
+        result.googleUserInfo?.email || '',
+        result.googleUserInfo?.name || '',
+        'google',
+        result.googleUserInfo?.photoURL,
+        accessToken
       );
 
       if (isNew) {
         dispatch(setUserAuthenticated({
           uid: result.user.uid,
-          email: result.email || '',
-          name: result.name || '',
+          email: result.googleUserInfo?.email || '',
+          name: result.googleUserInfo?.name || '',
           designation: 'admin',
           isNewUser: true,
         }));
@@ -241,107 +285,55 @@ export default function LoginScreen() {
             />
           </View>
 
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Join a Company Team</Text>
-            <View style={styles.joinLinkRow}>
-              <TextInput
-                style={styles.joinLinkInput}
-                placeholder="Paste join link here..."
-                value={joinLink}
-                onChangeText={setJoinLink}
-                placeholderTextColor="#999"
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <TouchableOpacity
-                style={[
-                  styles.joinButton,
-                  (!joinLink.trim() || loading) && styles.buttonDisabled,
-                ]}
-                onPress={handleJoinLink}
-                disabled={!joinLink.trim() || loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.joinButtonText}>Join</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-            {inlineError ? (
-              <Text style={styles.inlineError}>{inlineError}</Text>
-            ) : null}
-          </View>
+           <View style={styles.section}>
+             <Text style={styles.sectionLabel}>Join a Company Team</Text>
+             <View style={styles.joinLinkRow}>
+               <TextInput
+                 style={styles.joinLinkInput}
+                 placeholder="Paste join link here..."
+                 value={joinLink}
+                 onChangeText={setJoinLink}
+                 placeholderTextColor="#999"
+                 autoCapitalize="none"
+                 autoCorrect={false}
+               />
+               <TouchableOpacity
+                 style={[
+                   styles.joinButton,
+                   (!joinLink.trim() || loading) && styles.buttonDisabled,
+                 ]}
+                 onPress={handleJoinLink}
+                 disabled={!joinLink.trim() || loading}
+               >
+                 {loading ? (
+                   <ActivityIndicator color="#fff" />
+                 ) : (
+                   <Text style={styles.joinButtonText}>Join</Text>
+                 )}
+               </TouchableOpacity>
+             </View>
+             {inlineError ? (
+               <Text style={styles.inlineError}>{inlineError}</Text>
+             ) : null}
+           </View>
 
-          <View style={styles.divider}>
-            <View style={styles.line} />
-            <Text style={styles.orText}>(or)</Text>
-            <View style={styles.line} />
-          </View>
+           <View style={styles.divider}>
+             <View style={styles.line} />
+             <Text style={styles.orText}>(or)</Text>
+             <View style={styles.line} />
+           </View>
 
-          <View style={styles.section}>
-            <Text style={styles.sectionLabel}>Manage Your Company</Text>
-            <TextInput
-              style={[styles.input, !isEmailValid && email.length > 0 && styles.inputError]}
-              placeholder="Email"
-              value={email}
-              onChangeText={setEmail}
-              placeholderTextColor="#999"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            {!isEmailValid && email.length > 0 && (
-              <Text style={styles.validationError}>Please enter a valid email address</Text>
-            )}
+           <TouchableOpacity
+             style={styles.googleButton}
+             onPress={handleGoogleSignIn}
+             disabled={loading}
+           >
+             <MaterialCommunityIcons name="google" size={24} color="#DB4437" />
+             <Text style={styles.googleButtonText}>
+               {loading ? 'Signing in...' : 'Continue with Google'}
+             </Text>
+           </TouchableOpacity>
 
-            <TextInput
-              style={[styles.input, !isPasswordValid && password.length > 0 && styles.inputError]}
-              placeholder="Password"
-              value={password}
-              onChangeText={setPassword}
-              placeholderTextColor="#999"
-              secureTextEntry
-              autoCapitalize="none"
-            />
-            {!isPasswordValid && password.length > 0 && (
-              <Text style={styles.validationError}>
-                Password must be at least 8 characters with at least one number
-              </Text>
-            )}
-
-            <TouchableOpacity
-              style={[
-                styles.loginButton,
-                (!isEmailValid || !isPasswordValid || loading) && styles.buttonDisabled,
-              ]}
-              onPress={handleEmailLogin}
-              disabled={!isEmailValid || !isPasswordValid || loading}
-            >
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.loginButtonText}>Login</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.divider}>
-            <View style={styles.line} />
-            <Text style={styles.orText}>(or)</Text>
-            <View style={styles.line} />
-          </View>
-
-          <TouchableOpacity
-            style={styles.googleButton}
-            onPress={handleGoogleSignIn}
-            disabled={loading}
-          >
-            <MaterialCommunityIcons name="google" size={24} color="#DB4437" />
-            <Text style={styles.googleButtonText}>
-              {loading ? 'Signing in...' : 'Continue with Google'}
-            </Text>
-          </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
 

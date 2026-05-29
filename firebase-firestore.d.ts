@@ -1,1 +1,3 @@
-declare module 'firebase/firestore';
+declare module 'firebase/firestore' {
+  export * from '@firebase/firestore';
+}

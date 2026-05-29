@@ -1,15 +1,5 @@
 
-1. Splash Screen
-Build a React Native Splash screen component named SplashScreen.
 
-- Use SafeAreaView as root wrapper with flex: 1 and background color from theme (e.g. #1A1A2E or your brand color).
-- Center the app logo (Image component) both vertically and horizontally using justifyContent: 'center' and alignItems: 'center'.
-- Set logo opacity to 0.85.
-- No header, no status bar content (use StatusBar hidden={true}).
-- Use useEffect with setTimeout of exactly 3000ms.
-- On timeout: call navigation.replace('Login') — NOT navigate() — so Android back button cannot return to splash.
-- Cleanup: return clearTimeout inside useEffect cleanup function to prevent memory leaks.
-- No spinner, no loading text. Just logo and background.
 
 2. Login Screen
 Build a React Native LoginScreen component with three vertically stacked auth sections inside a KeyboardAvoidingView (behavior: 'padding' on iOS, 'height' on Android) wrapped in a ScrollView.
@@ -435,7 +425,7 @@ H. DRAWER PHOTO RECEIPTS:
    - Use expo-image-picker to select from camera or gallery.
    - Upload to Firebase Storage: storage().ref(`drawer/${workerId}/${date}.jpg`).putFile(localUri).
    - Store the download URL in DrawerMoney sheet PhotoURL column.
-   - In Admin's drawer view: thumbnail image shown per row, tap to expand full screen.
+   - In Admin's drawer view: thumbnail image shown per rcow, tap to expand full screen.
 
 NICE TO HAVE:
 

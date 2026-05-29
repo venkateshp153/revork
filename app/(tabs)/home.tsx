@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,11 +11,10 @@ import {
   Alert,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useSelector, useDispatch } from 'react-redux';
-import { useRouter } from 'expo-router';
+import { useSelector } from 'react-redux';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { RootState } from '@/redux/store';
-import { useFocusEffect } from '@react-navigation/native';
-import { calcMonthlyPay } from '@/redux/store/userSlice';
+
 import GenerateJoinLinkModal from '@/components/GenerateJoinLinkModal';
 
 const CACHE_TTL = 5 * 60 * 1000;
@@ -44,7 +43,6 @@ interface Clocking {
 
 export default function HomeScreen() {
   const router = useRouter();
-  const dispatch = useDispatch();
   const user = useSelector((state: RootState) => state.user);
 
   const [workers, setWorkers] = useState<Worker[]>([]);
@@ -61,15 +59,7 @@ export default function HomeScreen() {
   const currentWorkerId = user.workerProfile?.workerId;
   const currentPayPerHour = user.workerProfile?.payPerHour || 0;
 
-  useFocusEffect(
-    React.useCallback(() => {
-      if (Date.now() - lastFetched > CACHE_TTL) {
-        fetchData();
-      }
-    }, [])
-  );
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const sheetId = user.sheetId || user.workerProfile?.sheetId;
@@ -110,7 +100,15 @@ export default function HomeScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [user.sheetId, user.workerProfile?.sheetId]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      if (Date.now() - lastFetched > CACHE_TTL) {
+        fetchData();
+      }
+    }, [lastFetched, fetchData])
+  );
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -242,7 +240,7 @@ export default function HomeScreen() {
   const renderWorkerDashboard = () => (
     <View style={styles.section}>
       <View style={styles.workerTodayCard}>
-        <Text style={styles.workerTodayTitle}>Today's Summary</Text>
+        <Text style={styles.workerTodayTitle}>Today&apos;s Summary</Text>
         {workerTodayData ? (
           <>
             <View style={styles.workerStatsRow}>
@@ -279,7 +277,7 @@ export default function HomeScreen() {
         <Text style={styles.sectionTitle}>Drawer Money</Text>
         <View style={styles.drawerCard}>
           <Text style={styles.drawerAmount}>${drawerMoneyToday.toFixed(2)}</Text>
-          <Text style={styles.drawerLabel}>Today's drawer count</Text>
+          <Text style={styles.drawerLabel}>Today&apos;s drawer count</Text>
         </View>
       </View>
     </View>
@@ -328,32 +326,28 @@ export default function HomeScreen() {
     </View>
   );
 
-  const checkBirthdays = () => {
-    const today = new Date();
-    const todayMonth = today.getMonth();
-    const todayDay = today.getDate();
-
-    workers.forEach((worker) => {
-      if (worker.JoinDate) {
-        const joinDate = new Date(worker.JoinDate);
-        if (joinDate.getMonth() === todayMonth && joinDate.getDate() === todayDay) {
-          Alert.alert('🎂 Birthday!', `Wishing ${worker.Name} a happy birthday!`);
-        }
-      }
-    });
-  };
-
   useEffect(() => {
     if (workers.length > 0) {
-      checkBirthdays();
+      const today = new Date();
+      const todayMonth = today.getMonth();
+      const todayDay = today.getDate();
+
+      workers.forEach((worker) => {
+        if (worker.JoinDate) {
+          const joinDate = new Date(worker.JoinDate);
+          if (joinDate.getMonth() === todayMonth && joinDate.getDate() === todayDay) {
+            Alert.alert('🎂 Birthday!', `Wishing ${worker.Name} a happy birthday!`);
+          }
+        }
+      });
     }
   }, [workers]);
 
-  const handleGenerateJoinLink = () => {
+  const handleGenerateJoinLink = React.useCallback(() => {
     if (isAdmin) {
       setJoinLinkModalVisible(true);
     }
-  };
+  }, [isAdmin]);
 
   return (
     <ScrollView

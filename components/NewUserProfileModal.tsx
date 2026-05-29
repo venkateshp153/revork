@@ -19,6 +19,7 @@ import { RootState } from '@/redux/store';
 import { setProfile, setSheetId, setFolderId, setJoinLink } from '@/redux/store/userSlice';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import { createGoogleDriveStructure } from '@/src/utils/createGoogleDriveStructure';
+import { updateUserDriveFolder } from '@/assets/services/firebaseService';
 
 interface NewUserProfileModalProps {
   visible: boolean;
@@ -95,6 +96,8 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
       dispatch(setSheetId(result.sheetId));
       dispatch(setFolderId(result.folderId));
       dispatch(setJoinLink(result.joinLink));
+
+      await updateUserDriveFolder(user.uid!, result.folderId);
 
       setSetupLoading(false);
       router.replace('/(tabs)/home');

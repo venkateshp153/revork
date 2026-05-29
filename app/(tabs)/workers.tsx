@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -12,7 +12,7 @@ import { useRouter } from 'expo-router';
 import { useSelector } from 'react-redux';
 import { RootState } from '@/redux/store';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { calcMonthlyPay } from '@/redux/store/userSlice';
+
 
 const CACHE_TTL = 5 * 60 * 1000;
 
@@ -46,13 +46,7 @@ export default function WorkersScreen() {
   const isAdmin = user.profile?.designation === 'admin';
   const isManager = user.profile?.designation === 'manager';
 
-  useEffect(() => {
-    if (Date.now() - lastFetched > CACHE_TTL) {
-      fetchData();
-    }
-  }, []);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
       const sheetId = user.sheetId;
@@ -93,7 +87,13 @@ export default function WorkersScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [user.sheetId]);
+
+  useEffect(() => {
+    if (Date.now() - lastFetched > CACHE_TTL) {
+      fetchData();
+    }
+  }, [lastFetched, fetchData]);
 
   const handleRefresh = () => {
     setRefreshing(true);

@@ -11,7 +11,7 @@
     "ios": {
       "supportsTablet": true
     },
-  "android": {
+    "android": {
       "package": "com.venky534.revork",
       "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
@@ -31,13 +31,10 @@
         "expo-build-properties",
         {
           "android": {
-            "extraMavenRepos": [
-              "https://maven.google.com"
-            ]
+            "googleServicesFile": "./google-services.json"
           }
         }
       ],
-      "expo-router",
       [
         "expo-splash-screen",
         {

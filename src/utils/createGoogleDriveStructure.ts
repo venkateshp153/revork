@@ -74,7 +74,7 @@ export async function createGoogleDriveStructure(
     );
     console.log('Spreadsheet moved to folder');
 
-    const batchUpdateRequests = (Object.keys(HEADERS) as Array<keyof typeof HEADERS>)
+    const batchUpdateRequests = (Object.keys(HEADERS) as (keyof typeof HEADERS)[])
       .filter(sheetName => sheetName !== 'MyProfile')
       .map(sheetName => ({
         appendDimension: {
@@ -94,10 +94,6 @@ export async function createGoogleDriveStructure(
       );
     }
 
-    const myProfileSheetId = spreadsheetResponse.data.sheets.find(
-      (s: any) => s.properties.title === 'MyProfile'
-    ).properties.sheetId;
-
     await axios.post(
       `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/MyProfile:append`,
       {
@@ -109,7 +105,7 @@ export async function createGoogleDriveStructure(
       }
     );
 
-    for (const sheetName of Object.keys(HEADERS) as Array<keyof typeof HEADERS>) {
+    for (const sheetName of Object.keys(HEADERS) as (keyof typeof HEADERS)[]) {
       if (sheetName === 'MyProfile') continue;
       
       await axios.post(
@@ -148,12 +144,6 @@ export async function createGoogleDriveStructure(
       }
     );
     console.log('Reader permission granted (anyone with link)');
-
-    const fileResponse = await axios.get(
-      `https://www.googleapis.com/drive/v3/files/${sheetId}?fields=webViewLink`,
-      { headers: authHeaders }
-    );
-    const webViewLink = fileResponse.data.webViewLink;
 
     const joinLink = `workforce://join?sheetId=${sheetId}&token=${shareResponse.data.id}&companyId=${userEmail}`;
     console.log('Join link generated:', joinLink);

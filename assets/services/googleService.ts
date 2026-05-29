@@ -1,10 +1,46 @@
-import axios from 'axios';
+import axios, { AxiosInstance, InternalAxiosRequestConfig, AxiosError, AxiosResponse } from 'axios';
+
+interface CustomAxiosRequestConfig extends InternalAxiosRequestConfig {
+  _retry?: boolean;
+}
 
 export class GoogleService {
   private static instance: GoogleService;
+  private api: AxiosInstance;
   private accessToken: string | null = null;
 
-  private constructor() {}
+  private constructor() {
+    this.api = axios.create();
+
+    this.api.interceptors.request.use(
+      (config: InternalAxiosRequestConfig) => {
+        if (this.accessToken) {
+          config.headers.Authorization = `Bearer ${this.accessToken}`;
+        }
+        return config;
+      },
+      (error: AxiosError) => Promise.reject(error)
+    );
+
+    this.api.interceptors.response.use(
+      (response: AxiosResponse) => response,
+      async (error: AxiosError) => {
+        const originalRequest = error.config as CustomAxiosRequestConfig;
+        if (error.response?.status === 401 && originalRequest && !originalRequest._retry) {
+          originalRequest._retry = true;
+          try {
+            // In a real app, you would call a refresh token endpoint here.
+            // For this implementation, we notify the app to re-authenticate.
+            console.warn('Google Access Token expired. Re-authentication requested.');
+            return Promise.reject(new Error('TOKEN_EXPIRED'));
+          } catch (refreshError) {
+            return Promise.reject(refreshError);
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
+  }
 
   public static getInstance(): GoogleService {
     if (!GoogleService.instance) {
@@ -22,18 +58,12 @@ export class GoogleService {
     parentFolderId?: string
   ): Promise<string | null> {
     try {
-      const response = await axios.post(
+      const response = await this.api.post(
         'https://www.googleapis.com/drive/v3/files',
         {
           name: folderName,
           mimeType: 'application/vnd.google-apps.folder',
           parents: parentFolderId ? [parentFolderId] : [],
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
-          },
         }
       );
 
@@ -50,17 +80,11 @@ export class GoogleService {
     folderId: string
   ): Promise<{ spreadsheetId: string; spreadsheetUrl: string } | null> {
     try {
-      const response = await axios.post(
+      const response = await this.api.post(
         'https://sheets.googleapis.com/v4/spreadsheets',
         {
           properties: {
             title: title,
-          },
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
           },
         }
       );
@@ -84,16 +108,12 @@ export class GoogleService {
 
   private async moveFileToFolder(fileId: string, folderId: string) {
     try {
-      await axios.patch(
+      await this.api.patch(
         `https://www.googleapis.com/drive/v3/files/${fileId}`,
         {
           parents: [folderId],
         },
         {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
-          },
           params: {
             addParents: folderId,
             removeParents: 'root',
@@ -110,7 +130,7 @@ export class GoogleService {
     sheetName: string
   ): Promise<void> {
     try {
-      await axios.post(
+      await this.api.post(
         `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`,
         {
           requests: [
@@ -122,12 +142,6 @@ export class GoogleService {
               },
             },
           ],
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
-          },
         }
       );
 
@@ -144,16 +158,12 @@ export class GoogleService {
     data: any[][]
   ): Promise<void> {
     try {
-      await axios.post(
+      await this.api.post(
         `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${sheetName}:append`,
         {
           values: data,
         },
         {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
-          },
           params: {
             valueInputOption: 'RAW',
           },
@@ -209,18 +219,12 @@ export class GoogleService {
     role: 'reader' | 'writer' | 'commenter' | 'organizer' | 'fileOrganizer'
   ): Promise<void> {
     try {
-      await axios.post(
+      await this.api.post(
         `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
         {
           type: 'user',
           role: role,
           emailAddress: userEmail,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json',
-          },
         }
       );
 

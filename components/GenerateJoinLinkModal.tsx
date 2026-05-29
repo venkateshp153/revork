@@ -13,11 +13,11 @@ import {
   UIManager,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useSelector, useDispatch } from 'react-redux';
+import { useSelector } from 'react-redux';
 import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
 import { RootState } from '@/redux/store';
-import { setJoinLink } from '@/redux/store/userSlice';
+
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -38,7 +38,6 @@ export default function GenerateJoinLinkModal({ visible, onClose }: GenerateJoin
   const [loading, setLoading] = useState(false);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
-  const dispatch = useDispatch();
   const user = useSelector((state: RootState) => state.user);
   const companyName = user.profile?.companyName || 'Company';
   const sheetId = user.sheetId;

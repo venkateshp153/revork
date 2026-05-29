@@ -46,7 +46,7 @@ export default function TabLayout() {
             tabPress: () => animateTab(homeAnim),
           }}
           options={{
-            tabBarLabel: ({ focused, color }) => (
+            tabBarLabel: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.Text
                 style={[
                   styles.label,
@@ -63,7 +63,7 @@ export default function TabLayout() {
                 Home
               </Animated.Text>
             ),
-            tabBarIcon: ({ focused, color }) => (
+            tabBarIcon: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.View style={{
                 transform: [{ scale: homeAnim }],
                 opacity: homeAnim.interpolate({
@@ -87,7 +87,7 @@ export default function TabLayout() {
               tabPress: () => animateTab(workersAnim),
             }}
             options={{
-            tabBarLabel: ({ focused, color }) => (
+            tabBarLabel: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.Text
                 style={[
                   styles.label,
@@ -104,7 +104,7 @@ export default function TabLayout() {
                 Workers
               </Animated.Text>
             ),
-            tabBarIcon: ({ focused, color }) => (
+            tabBarIcon: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.View style={{
                 transform: [{ scale: workersAnim }],
                 opacity: workersAnim.interpolate({
@@ -128,7 +128,7 @@ export default function TabLayout() {
             tabPress: () => animateTab(analyticsAnim),
           }}
           options={{
-            tabBarLabel: ({ focused, color }) => (
+            tabBarLabel: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.Text
                 style={[
                   styles.label,
@@ -145,7 +145,7 @@ export default function TabLayout() {
                 Analytics
               </Animated.Text>
             ),
-            tabBarIcon: ({ focused, color }) => (
+            tabBarIcon: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.View style={{
                 transform: [{ scale: analyticsAnim }],
                 opacity: analyticsAnim.interpolate({
@@ -168,7 +168,7 @@ export default function TabLayout() {
             tabPress: () => animateTab(notificationsAnim),
           }}
           options={{
-            tabBarLabel: ({ focused, color }) => (
+            tabBarLabel: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.Text
                 style={[
                   styles.label,
@@ -185,7 +185,7 @@ export default function TabLayout() {
                 Alerts
               </Animated.Text>
             ),
-            tabBarIcon: ({ focused, color }) => (
+            tabBarIcon: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.View style={{
                 transform: [{ scale: notificationsAnim }],
                 opacity: notificationsAnim.interpolate({
@@ -208,7 +208,7 @@ export default function TabLayout() {
             tabPress: () => animateTab(profileAnim),
           }}
           options={{
-            tabBarLabel: ({ focused, color }) => (
+            tabBarLabel: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.Text
                 style={[
                   styles.label,
@@ -225,7 +225,7 @@ export default function TabLayout() {
                 Profile
               </Animated.Text>
             ),
-            tabBarIcon: ({ focused, color }) => (
+            tabBarIcon: ({ focused, color }: { focused: boolean; color: string }) => (
               <Animated.View style={{
                 transform: [{ scale: profileAnim }],
                 opacity: profileAnim.interpolate({

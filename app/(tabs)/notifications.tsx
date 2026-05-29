@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -60,11 +60,7 @@ export default function NotificationsScreen() {
   const isWorker = user.designation === 'worker' || user.workerProfile?.designation === 'worker';
   const currentWorkerId = user.workerProfile?.workerId;
 
-  useEffect(() => {
-    fetchNotifications();
-  }, []);
-
-  const fetchNotifications = async () => {
+  const fetchNotifications = useCallback(async () => {
     try {
       const sheetId = user.sheetId || user.workerProfile?.sheetId;
       if (!sheetId) return;
@@ -107,7 +103,11 @@ export default function NotificationsScreen() {
     } catch (error) {
       console.error('Error fetching notifications:', error);
     }
-  };
+  }, [user.sheetId, user.workerProfile?.sheetId, isWorker, currentWorkerId, isManager]);
+
+  useEffect(() => {
+    fetchNotifications();
+  }, [fetchNotifications]);
 
   const handleMarkRead = async (notif: Notification) => {
     setExpandedNotif(expandedNotif === notif.NotifID ? null : notif.NotifID);
@@ -128,12 +128,12 @@ export default function NotificationsScreen() {
           }
         );
 
-        setNotifications((prev) =>
-          prev.map((n) => (n.NotifID === notif.NotifID ? { ...n, Read: 'true' } : n))
-        );
-      } catch (error) {
-        console.error('Error updating notification:', error);
-      }
+      setNotifications((prev) =>
+        prev.map((n) => (n.NotifID === notif.NotifID ? { ...n, Read: 'true' } : n))
+      );
+    } catch {
+      console.error('Error updating notification');
+    }
     }
   };
 
@@ -190,11 +190,11 @@ export default function NotificationsScreen() {
         }
       );
 
-      Alert.alert('Success', `Leave request ${action}`);
-      fetchNotifications();
-    } catch (error) {
-      Alert.alert('Error', 'Failed to process leave request');
-    }
+        Alert.alert('Success', `Leave request ${action}`);
+        fetchNotifications();
+      } catch {
+        Alert.alert('Error', 'Failed to process leave request');
+      }
   };
 
   const handleComposeAnnouncement = async () => {
@@ -250,7 +250,7 @@ export default function NotificationsScreen() {
         setComposeTarget('all');
         fetchNotifications();
       }
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to send announcement');
     }
   };
@@ -319,7 +319,7 @@ export default function NotificationsScreen() {
       setLeaveReason('');
       setLeaveCovering('');
       fetchNotifications();
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to submit leave request');
     }
   };

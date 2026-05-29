@@ -8,15 +8,14 @@ import {
   TextInput,
   FlatList,
   Alert,
+  Dimensions,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSelector } from 'react-redux';
 import { RootState } from '@/redux/store';
 import { BarChart } from 'react-native-chart-kit';
-import { Dimensions } from 'react-native';
 
-const screenWidth = Dimensions.get('window').width;
 
 interface Clocking {
   WorkerID: string;
@@ -52,7 +51,8 @@ export default function WorkerDetailsScreen() {
   const [payPerHour, setPayPerHour] = useState('0');
   const [clockings, setClockings] = useState<Clocking[]>([]);
   const [drawerMoney, setDrawerMoney] = useState<DrawerMoney[]>([]);
-  const [loading, setLoading] = useState(false);
+
+  const screenWidth = Dimensions.get('window').width;
 
   const isAdmin = user.profile?.designation === 'admin';
   const isWorker = user.designation === 'worker' || user.workerProfile?.designation === 'worker';
@@ -63,18 +63,13 @@ export default function WorkerDetailsScreen() {
       Alert.alert('Access Denied', 'You can only view your own data');
       router.back();
     }
-  }, [workerId, currentWorkerId, isWorker]);
+  }, [workerId, currentWorkerId, isWorker, router]);
 
-  useEffect(() => {
-    fetchData();
-  }, [selectedMonth, selectedYear]);
+  const fetchData = React.useCallback(async () => {
+    const sheetId = user.sheetId || user.workerProfile?.sheetId;
+    if (!sheetId) return;
 
-  const fetchData = async () => {
-    setLoading(true);
     try {
-      const sheetId = user.sheetId || user.workerProfile?.sheetId;
-      if (!sheetId) return;
-
       const [clockingsRes, drawerRes] = await Promise.all([
         fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Clockings?key=${process.env.EXPO_PUBLIC_API_KEY}`),
         fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/DrawerMoney?key=${process.env.EXPO_PUBLIC_API_KEY}`),
@@ -114,10 +109,12 @@ export default function WorkerDetailsScreen() {
       }
     } catch (error) {
       console.error('Error fetching data:', error);
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [workerId, selectedMonth, selectedYear, user.sheetId, user.workerProfile?.sheetId]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const years = Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - 2 + i);
