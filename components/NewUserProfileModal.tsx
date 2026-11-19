@@ -8,18 +8,18 @@ import {
   Modal,
   ActivityIndicator,
   ScrollView,
-  BackHandler,
-  Platform,
   Alert,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDispatch, useSelector } from 'react-redux';
 import { useRouter } from 'expo-router';
-import { RootState } from '@/redux/store';
-import { setProfile, setSheetId, setFolderId, setJoinLink } from '@/redux/store/userSlice';
+import { RootState, persistor } from '@/redux/store';
+import { setProfile, setSheetId, setFolderId, setJoinLink, logout } from '@/redux/store/userSlice';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
-import { createGoogleDriveStructure } from '@/src/utils/createGoogleDriveStructure';
-import { updateUserDriveFolder } from '@/assets/services/firebaseService';
+import { ensureCompanyWorkspace } from '@/src/utils/workspace';
+import { signOutUser, completeUserOnboarding, auth } from '@/assets/services/firebaseService';
+import { ensureAdminWorkerRow } from '@/src/utils/workerManagement';
+import { ensurePublicReadAccess, updateSheetRange } from '@/src/utils/sheets';
 
 interface NewUserProfileModalProps {
   visible: boolean;
@@ -38,6 +38,7 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
   const [companyEmail, setCompanyEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [setupLoading, setSetupLoading] = useState(false);
+  const [exiting, setExiting] = useState(false);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
 
   const dispatch = useDispatch();
@@ -73,8 +74,19 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
     setLoading(true);
 
     try {
+      // Resolve uid from Redux or from the live Firebase session. If neither
+      // exists (stale persisted state), the save cannot continue safely.
+      const uid = user.uid || auth.currentUser?.uid;
+      if (!uid) {
+        console.error('[AuthDebug] No authenticated uid available for onboarding save');
+        Alert.alert('Session expired', 'Please sign in again to finish setting up your workspace.');
+        setLoading(false);
+        return;
+      }
+      console.log('[AuthDebug 16] Profile Save clicked. uid:', uid, '| getTokens() for Drive…');
+
       const profileData = {
-        uid: user.uid || undefined,
+        uid: uid,
         designation: 'admin' as const,
         companyName: companyName.trim(),
         companyAddress: companyAddress.trim() || undefined,
@@ -82,22 +94,100 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
         companyEmail: companyEmail.trim(),
       };
 
-      dispatch(setProfile(profileData));
-
       setSetupLoading(true);
 
+      // 1. Resolve the company workspace in Drive. This reuses an existing
+      //    folder + spreadsheet for the account when one already exists, so a
+      //    single Google account can never end up with two company folders.
       const tokens = await GoogleSignin.getTokens();
-      const result = await createGoogleDriveStructure(
-        profileData.companyName,
-        tokens.accessToken,
-        profileData.companyEmail
+      const result = await ensureCompanyWorkspace({
+        uid,
+        companyName: profileData.companyName,
+        companyEmail: profileData.companyEmail,
+        accessToken: tokens.accessToken,
+      });
+
+      const publicRead = await ensurePublicReadAccess(
+        result.sheetId,
+        tokens.accessToken
+      );
+      if (!publicRead) {
+        Alert.alert(
+          'Sharing warning',
+          'The workspace was created, but Google did not allow "Anyone with the link" sharing. Workers can still join by signing in with the Google email you add for them. You can retry sharing from Workers → share icon.'
+        );
+      }
+
+      // 2. Save the account + workspace ids to Firestore. This is the moment a
+      //    new admin actually gets created in `users/{uid}` (sign-in only
+      //    checked Firestore).
+      await completeUserOnboarding({
+        uid,
+        email: email.trim(),
+        name: name.trim(),
+        companyName: profileData.companyName,
+        companyAddress: profileData.companyAddress,
+        companyPhone: profileData.companyPhone,
+        companyEmail: profileData.companyEmail,
+        folderId: result.folderId,
+        folderName: result.folderName,
+        sheetId: result.sheetId,
+        joinLink: result.joinLink,
+        photoURL: auth.currentUser?.photoURL || undefined,
+        authProvider: 'google',
+      });
+      console.log('[AuthDebug] Onboarding workspace saved to users/{uid}:', {
+        folderId: result.folderId,
+        sheetId: result.sheetId,
+        companyName: profileData.companyName,
+      });
+
+      // 2b. Seed the owner's row in the Workers sheet so the directory,
+      //     stats and clock activity have data from day one.
+      await ensureAdminWorkerRow(result.sheetId, tokens.accessToken, {
+        uid,
+        name: name.trim() || user.name || '',
+        email: email.trim() || user.email || '',
+        phone: companyPhone.trim(),
+        photoURL: auth.currentUser?.photoURL || '',
+      });
+
+      // 2c. Fill the MyProfile row with the admin's full details.
+      await updateSheetRange(
+        result.sheetId,
+        'MyProfile!A2:L2',
+        [[
+          uid,
+          name.trim(),
+          email.trim(),
+          'admin',
+          profileData.companyName,
+          profileData.companyAddress || '',
+          profileData.companyPhone,
+          profileData.companyEmail,
+          result.sheetId,
+          result.folderId,
+          result.joinLink,
+          new Date().toISOString(),
+        ]],
+        tokens.accessToken
       );
 
+      // 3. Only now mark the profile complete in Redux — the workspace ids are
+      //    included so the app can immediately read/populate the sheet.
+      dispatch(setProfile({
+        ...profileData,
+        sheetId: result.sheetId,
+        folderId: result.folderId,
+        folderName: result.folderName,
+        folderUrl: result.folderUrl,
+        folderPath: result.folderPath,
+        sheetUrl: result.sheetUrl,
+        joinLink: result.joinLink,
+      }));
       dispatch(setSheetId(result.sheetId));
       dispatch(setFolderId(result.folderId));
       dispatch(setJoinLink(result.joinLink));
-
-      await updateUserDriveFolder(user.uid!, result.folderId);
 
       setSetupLoading(false);
       router.replace('/(tabs)/home');
@@ -119,25 +209,34 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
     }
   };
 
-  const handleExit = () => {
-    Alert.alert(
-      'Your account has not been created. Exit app?',
-      '',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Exit App',
-          style: 'destructive',
-          onPress: () => {
-            if (Platform.OS === 'android') {
-              BackHandler.exitApp();
-            } else {
-              BackHandler.exitApp();
-            }
-          },
-        },
-      ]
-    );
+  const handleExit = async () => {
+    if (exiting) return;
+
+    console.log('[AuthDebug 17] Close (X) pressed → signing out and returning to login…');
+    setExiting(true);
+
+    // 1. Wipe persisted Redux storage (user + grocery slices in AsyncStorage)
+    try {
+      await persistor.purge();
+      console.log('[AuthDebug 17] Persisted Redux storage purged ✔');
+    } catch (e) {
+      console.error('[AuthDebug 17] Failed to purge persisted state:', e);
+    }
+
+    // 2. Sign out of Firebase + Google (removes persisted Auth session)
+    try {
+      await signOutUser();
+      console.log('[AuthDebug 17] Firebase + Google sign-out complete ✔');
+    } catch (e) {
+      console.error('[AuthDebug 17] Sign out during profile-setup exit failed:', e);
+    }
+
+    // 3. Reset in-memory Redux (clears isNewUser → closes the modal)
+    dispatch(logout());
+
+    // 4. Show the login screen
+    router.replace('/(auth)/login');
+    setExiting(false);
   };
 
   return (
@@ -158,8 +257,17 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
           <View style={styles.container}>
             <View style={styles.header}>
               <Text style={styles.title}>Complete Your Profile</Text>
-              <TouchableOpacity onPress={handleExit} style={styles.closeButton}>
-                <MaterialCommunityIcons name="close" size={28} color="#333" />
+              <TouchableOpacity
+                onPress={handleExit}
+                style={styles.closeButton}
+                disabled={exiting}
+                accessibilityLabel="Close and return to login"
+              >
+                {exiting ? (
+                  <ActivityIndicator size="small" color="#333" />
+                ) : (
+                  <MaterialCommunityIcons name="close" size={28} color="#333" />
+                )}
               </TouchableOpacity>
             </View>
 

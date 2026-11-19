@@ -8,34 +8,35 @@ import {
   TextInput,
   FlatList,
   Alert,
-  Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useSelector } from 'react-redux';
 import { RootState } from '@/redux/store';
-import { BarChart } from 'react-native-chart-kit';
-
-
-interface Clocking {
-  WorkerID: string;
-  Name: string;
-  Date: string;
-  ClockIn: string;
-  ClockOut: string;
-  BreakMins: string;
-  HoursWorked: string;
-  DayTotal: string;
-}
-
-interface DrawerMoney {
-  WorkerID: string;
-  Name: string;
-  Date: string;
-  DrawerAmount: string;
-  Notes: string;
-  PhotoURL: string;
-}
+import { getRoleTheme } from '@/assets/constants/roleTheme';
+import {
+  fetchSheetRows,
+  getGoogleAccessToken,
+  type SheetRow,
+} from '@/src/utils/sheets';
+import {
+  effectiveDesignation,
+  findMyWorkerRow,
+  rowHasEditAccess,
+  rowHasReadAccess,
+  setWorkerEditAccess,
+  setWorkerReadAccess,
+  updateWorkerFields,
+} from '@/src/utils/workerManagement';
+import { computeWorkerPerformance } from '@/src/utils/attendanceStats';
+import { localDateString } from '@/src/utils/attendance';
+import {
+  DEFAULT_COMPANY_SETTINGS,
+  readCompanySettings,
+  type CompanySettings,
+} from '@/src/utils/settings';
+import { notifyAdminOfEdit } from '@/src/utils/editAccess';
 
 export default function WorkerDetailsScreen() {
   const params = useLocalSearchParams();
@@ -46,78 +47,174 @@ export default function WorkerDetailsScreen() {
   const editModeParam = params.editMode === 'true';
 
   const [isEditing, setIsEditing] = useState(editModeParam);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+  const [roleDropdownOpen, setRoleDropdownOpen] = useState(false);
   const [payPerHour, setPayPerHour] = useState('0');
-  const [clockings, setClockings] = useState<Clocking[]>([]);
-  const [drawerMoney, setDrawerMoney] = useState<DrawerMoney[]>([]);
+  const [workerName, setWorkerName] = useState('');
+  const [workerPhone, setWorkerPhone] = useState('');
+  const [workerEmail, setWorkerEmail] = useState('');
+  const [workerBio, setWorkerBio] = useState('');
+  const [workerDesignation, setWorkerDesignation] = useState('worker');
+  const [clockings, setClockings] = useState<SheetRow[]>([]);
+  const [allClockings, setAllClockings] = useState<SheetRow[]>([]);
+  const [workerRows, setWorkerRows] = useState<SheetRow[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [accessBusy, setAccessBusy] = useState(false);
+  const [companySettings, setCompanySettings] = useState<CompanySettings>(
+    DEFAULT_COMPANY_SETTINGS
+  );
 
-  const screenWidth = Dimensions.get('window').width;
-
-  const isAdmin = user.profile?.designation === 'admin';
-  const isWorker = user.designation === 'worker' || user.workerProfile?.designation === 'worker';
   const currentWorkerId = user.workerProfile?.workerId;
+  const sheetId = user.sheetId || user.workerProfile?.sheetId || '';
+
+  const workerRow = useMemo(
+    () =>
+      workerRows.find(
+        (row) =>
+          row.WorkerID === workerId ||
+          (!!user.workerProfile?.workerId && row.WorkerID === user.workerProfile.workerId && workerId === 'me')
+      ),
+    [workerRows, workerId, user.workerProfile?.workerId]
+  );
+  const myRow = useMemo(
+    () =>
+      findMyWorkerRow(
+        workerRows,
+        currentWorkerId,
+        user.email || user.workerProfile?.email
+      ),
+    [workerRows, currentWorkerId, user.email, user.workerProfile?.email]
+  );
+
+  const designation = effectiveDesignation(
+    user.profile?.designation || user.designation,
+    myRow
+  );
+  const isAdmin = designation === 'admin';
+  const isManager = designation === 'manager';
+  const isEmployeeRole = !isAdmin && !isManager;
+  const theme = getRoleTheme(designation, isEmployeeRole);
+  const targetHasAccess = rowHasEditAccess(workerRow);
+  const hasEditAccess = rowHasEditAccess(myRow);
+  const hasReadAccess = rowHasReadAccess(myRow);
+  const canEdit = isAdmin || hasEditAccess;
+  const canReadAll = isAdmin || isManager || hasReadAccess || hasEditAccess;
+  const dataReady = workerRows.length > 0;
 
   useEffect(() => {
-    if (isWorker && workerId !== currentWorkerId) {
-      Alert.alert('Access Denied', 'You can only view your own data');
+    // Wait for Workers to load: a link-joined manager starts with
+    // designation "worker" until their actual row is resolved.
+    if (!dataReady) return;
+    if (
+      isEmployeeRole &&
+      !canReadAll &&
+      workerId !== currentWorkerId &&
+      workerId !== 'me'
+    ) {
+      Alert.alert('Access Denied', 'Ask the admin to grant read access.');
       router.back();
     }
-  }, [workerId, currentWorkerId, isWorker, router]);
+  }, [
+    workerId,
+    currentWorkerId,
+    isEmployeeRole,
+    canReadAll,
+    dataReady,
+    router,
+  ]);
 
   const fetchData = React.useCallback(async () => {
-    const sheetId = user.sheetId || user.workerProfile?.sheetId;
     if (!sheetId) return;
 
     try {
-      const [clockingsRes, drawerRes] = await Promise.all([
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Clockings?key=${process.env.EXPO_PUBLIC_API_KEY}`),
-        fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/DrawerMoney?key=${process.env.EXPO_PUBLIC_API_KEY}`),
+      const [clockingRows, allWorkers, settings] = await Promise.all([
+        fetchSheetRows(sheetId, 'Clockings'),
+        fetchSheetRows(sheetId, 'Workers'),
+        readCompanySettings(sheetId),
       ]);
 
-      const clockingsData = await clockingsRes.json();
-      const drawerData = await drawerRes.json();
+      const resolvedId =
+        workerId === 'me' ? user.workerProfile?.workerId : workerId;
+      const now = new Date();
+      const month = now.getMonth();
+      const year = now.getFullYear();
 
-      if (clockingsData.values) {
-        const headers = clockingsData.values[0];
-        const rows = clockingsData.values.slice(1).map((row: string[]) => {
-          const obj: any = {};
-          headers.forEach((h: string, i: number) => (obj[h] = row[i]));
-          return obj as Clocking;
-        });
-        
-        const filtered = rows.filter((c: Clocking) => {
+      setWorkerRows(allWorkers);
+      setAllClockings(clockingRows);
+      setCompanySettings(settings);
+      setClockings(
+        clockingRows.filter((c) => {
           const date = new Date(c.Date);
-          return c.WorkerID === workerId && date.getMonth() === selectedMonth && date.getFullYear() === selectedYear;
-        });
-        setClockings(filtered);
-      }
-
-      if (drawerData.values) {
-        const headers = drawerData.values[0];
-        const rows = drawerData.values.slice(1).map((row: string[]) => {
-          const obj: any = {};
-          headers.forEach((h: string, i: number) => (obj[h] = row[i]));
-          return obj as DrawerMoney;
-        });
-        
-        const filtered = rows.filter((d: DrawerMoney) => {
-          const date = new Date(d.Date);
-          return d.WorkerID === workerId && date.getMonth() === selectedMonth && date.getFullYear() === selectedYear;
-        });
-        setDrawerMoney(filtered);
-      }
+          return (
+            c.WorkerID === resolvedId &&
+            date.getMonth() === month &&
+            date.getFullYear() === year
+          );
+        })
+      );
     } catch (error) {
       console.error('Error fetching data:', error);
     }
-  }, [workerId, selectedMonth, selectedYear, user.sheetId, user.workerProfile?.sheetId]);
+  }, [workerId, sheetId, user.workerProfile?.workerId]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const years = Array.from({ length: 5 }, (_, i) => new Date().getFullYear() - 2 + i);
+  useEffect(() => {
+    if (workerRow?.PayPerHour) {
+      setPayPerHour(workerRow.PayPerHour);
+    }
+    setWorkerName(workerRow?.Name || '');
+    setWorkerPhone(workerRow?.Phone || '');
+    setWorkerEmail(workerRow?.Email || '');
+    setWorkerBio(workerRow?.Bio || '');
+    setWorkerDesignation(workerRow?.Designation || 'worker');
+  }, [workerRow?.PayPerHour, workerRow?.Name, workerRow?.Phone, workerRow?.Email, workerRow?.Bio, workerRow?.Designation]);
+
+  const resolvedId =
+    workerId === 'me' ? user.workerProfile?.workerId : workerId;
+
+  const monthStart = useMemo(() => {
+    const now = new Date();
+    return localDateString(new Date(now.getFullYear(), now.getMonth(), 1));
+  }, []);
+
+  const performance = useMemo(
+    () =>
+      computeWorkerPerformance({
+        clockings: allClockings,
+        workerId: resolvedId || '',
+        monthStart,
+        officeStart: companySettings.officeStart,
+        dailyWorkHours: companySettings.dailyWorkHours,
+        payPerHour: parseFloat(payPerHour || '0') || 0,
+      }),
+    [
+      allClockings,
+      resolvedId,
+      monthStart,
+      companySettings.officeStart,
+      companySettings.dailyWorkHours,
+      payPerHour,
+    ]
+  );
+
+  const recentClockings = useMemo(() => {
+    if (!resolvedId) return [];
+    const sorted = allClockings
+      .filter((row) => row.WorkerID === resolvedId && row.ClockIn)
+      .sort(
+        (a, b) =>
+          (b.Date || '').localeCompare(a.Date || '') ||
+          Number(b._row || 0) - Number(a._row || 0)
+      );
+    const lastThreeDays = Array.from(
+      new Set(sorted.map((row) => (row.Date || '').slice(0, 10)))
+    ).slice(0, 3);
+    return sorted.filter((row) =>
+      lastThreeDays.includes((row.Date || '').slice(0, 10))
+    );
+  }, [allClockings, resolvedId]);
 
   const totalHours = useMemo(() => {
     return clockings.reduce((sum, c) => sum + parseFloat(c.HoursWorked as string || '0'), 0);
@@ -135,31 +232,166 @@ export default function WorkerDetailsScreen() {
     return clockings.length > 0 ? totalHours / clockings.length : 0;
   }, [totalHours, clockings]);
 
-  const attendanceRate = useMemo(() => {
-    const workingDays = new Date(selectedYear, selectedMonth + 1, 0).getDate();
-    const daysWorked = clockings.length;
-    return Math.round((daysWorked / workingDays) * 100);
-  }, [clockings, selectedMonth, selectedYear]);
+  const handleSavePayRate = async () => {
+    if (!canEdit) {
+      Alert.alert('Read only', 'Ask an admin to grant edit access.');
+      return;
+    }
+    if (!sheetId) return;
+    setSaving(true);
+    try {
+      const token = await getGoogleAccessToken(true);
+      const resolvedId =
+        workerId === 'me' ? user.workerProfile?.workerId : workerId;
+      await updateWorkerFields(
+        sheetId,
+        token,
+        { workerId: resolvedId || workerRow?.WorkerID, email: workerRow?.Email },
+        {
+          Name: workerName.trim(),
+          Phone: workerPhone.trim(),
+          Email: workerEmail.trim(),
+          Bio: workerBio.trim(),
+          Designation: workerDesignation,
+          PayPerHour: payPerHour.trim() || '0',
+        }
+      );
+      setWorkerRows((prev) =>
+        prev.map((row) =>
+          row.WorkerID === (resolvedId || workerRow?.WorkerID)
+            ? {
+                ...row,
+                Name: workerName.trim(),
+                Phone: workerPhone.trim(),
+                Email: workerEmail.trim(),
+                Bio: workerBio.trim(),
+                Designation: workerDesignation,
+                PayPerHour: payPerHour.trim() || '0',
+              }
+            : row
+        )
+      );
+      setIsEditing(false);
 
-  const chartData = useMemo(() => {
-    const daysData: Record<number, number> = {};
-    clockings.forEach((c) => {
-      const day = new Date(c.Date).getDate();
-      daysData[day] = (daysData[day] || 0) + parseFloat(c.HoursWorked as string || '0');
-    });
+      if (!isAdmin) {
+        await notifyAdminOfEdit({
+          sheetId,
+          token,
+          actorWorkerId: currentWorkerId || myRow?.WorkerID || '',
+          actorName: myRow?.Name || user.name || 'A teammate',
+          targetName: workerRow?.Name || 'a worker',
+          action: 'updated worker details',
+        });
+      }
 
-    return {
-      labels: Object.keys(daysData).map(String),
-      datasets: [{ data: Object.values(daysData) }],
-    };
-  }, [clockings]);
-
-  const handleSavePayRate = () => {
-    Alert.alert('Success', 'Pay rate updated');
-    setIsEditing(false);
+      Alert.alert(
+        'Saved',
+        isAdmin
+          ? 'Worker details updated.'
+          : 'Saved. The admin has been notified.'
+      );
+    } catch (error: any) {
+      Alert.alert('Unable to save', error?.message || 'Try again.');
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const renderClockingItem = ({ item }: { item: Clocking }) => (
+  const handleToggleAccess = () => {
+    if (!isAdmin || !workerRow) return;
+    const enabled = targetHasAccess;
+    Alert.alert(
+      enabled ? 'Revoke edit access?' : 'Give edit access?',
+      enabled
+        ? `${workerRow.Name} will no longer be able to edit data.`
+        : `${workerRow.Name} will be able to edit data in the app once. Clock-in/out stays enabled because the sheet is shared as Editor.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: enabled ? 'Revoke' : 'Give access',
+          style: enabled ? 'destructive' : 'default',
+          onPress: async () => {
+            setAccessBusy(true);
+            try {
+              const token = await getGoogleAccessToken(true);
+              if (!token) throw new Error('Sign in with Google to manage access.');
+              const result = await setWorkerEditAccess(
+                sheetId,
+                token,
+                { workerId: workerRow.WorkerID, email: workerRow.Email },
+                !enabled
+              );
+              setWorkerRows((prev) =>
+                prev.map((row) =>
+                  row.WorkerID === workerRow.WorkerID
+                    ? { ...row, EditAccess: enabled ? 'false' : 'true' }
+                    : row
+                )
+              );
+              if (!result.driveUpdated) {
+                Alert.alert(
+                  'Sheet updated',
+                  `Access flag saved, but Drive sharing could not be updated${
+                    result.driveError ? `: ${result.driveError}` : '.'
+                  }`
+                );
+              }
+            } catch (error: any) {
+              Alert.alert('Access update failed', error?.message || 'Try again.');
+            } finally {
+              setAccessBusy(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleToggleReadAccess = () => {
+    if (!isAdmin || !workerRow) return;
+    const enabled = rowHasReadAccess(workerRow);
+    Alert.alert(
+      enabled ? 'Revoke read access?' : 'Give read access?',
+      enabled
+        ? `${workerRow.Name} will no longer be able to view other workers' details.`
+        : `${workerRow.Name} will be able to view every worker's details (read only).`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: enabled ? 'Revoke' : 'Give access',
+          style: enabled ? 'destructive' : 'default',
+          onPress: async () => {
+            setAccessBusy(true);
+            try {
+              const token = await getGoogleAccessToken(true);
+              if (!token) {
+                throw new Error('Sign in with Google to manage access.');
+              }
+              await setWorkerReadAccess(
+                sheetId,
+                token,
+                { workerId: workerRow.WorkerID, email: workerRow.Email },
+                !enabled
+              );
+              setWorkerRows((prev) =>
+                prev.map((row) =>
+                  row.WorkerID === workerRow.WorkerID
+                    ? { ...row, ReadAccess: enabled ? 'false' : 'true' }
+                    : row
+                )
+              );
+            } catch (error: any) {
+              Alert.alert('Access update failed', error?.message || 'Try again.');
+            } finally {
+              setAccessBusy(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const renderClockingItem = ({ item }: { item: SheetRow }) => (
     <View style={styles.recordCard}>
       <View style={styles.recordHeader}>
         <Text style={styles.recordDate}>{item.Date}</Text>
@@ -195,17 +427,11 @@ export default function WorkerDetailsScreen() {
     </View>
   );
 
-  const renderDrawerItem = ({ item }: { item: DrawerMoney }) => (
-    <View style={styles.drawerCard}>
-      <View style={styles.drawerHeader}>
-        <Text style={styles.drawerDate}>{item.Date}</Text>
-        <Text style={styles.drawerAmount}>${item.DrawerAmount}</Text>
-      </View>
-      {item.Notes ? (
-        <Text style={styles.drawerNotes}>{item.Notes}</Text>
-      ) : null}
-    </View>
-  );
+  const displayName =
+    workerRow?.Name ||
+    (workerId === 'me' ? user.name || 'You' : `Worker ${workerId}`);
+  const displayDesignation =
+    workerRow?.Designation || user.workerProfile?.designation || 'Employee';
 
   return (
     <View style={styles.container}>
@@ -214,12 +440,16 @@ export default function WorkerDetailsScreen() {
           <MaterialCommunityIcons name="arrow-left" size={24} color="#333" />
         </TouchableOpacity>
         <View style={styles.headerInfo}>
-          <Text style={styles.workerName}>{workerId === 'me' ? (user.name || 'You') : `Worker ${workerId}`}</Text>
-          <Text style={styles.workerDesignation}>{user.workerProfile?.designation || 'Worker'}</Text>
+          <Text style={styles.workerName}>{displayName}</Text>
+          <Text style={styles.workerDesignation}>{displayDesignation}</Text>
         </View>
-        {isAdmin && (
+        {canEdit && (
           <TouchableOpacity style={styles.editButton} onPress={() => setIsEditing(!isEditing)}>
-            <MaterialCommunityIcons name={isEditing ? 'check' : 'pencil'} size={24} color="#00af5bff" />
+            <MaterialCommunityIcons
+              name={isEditing ? 'check' : 'pencil'}
+              size={24}
+              color={theme.accent}
+            />
           </TouchableOpacity>
         )}
       </View>
@@ -238,42 +468,305 @@ export default function WorkerDetailsScreen() {
           </View>
           <View style={styles.statCard}>
             <MaterialCommunityIcons name="calendar-check" size={28} color="#00af5bff" />
-            <Text style={styles.statValue}>{attendanceRate}%</Text>
+            <Text style={styles.statValue}>{performance.attendanceRate}%</Text>
             <Text style={styles.statLabel}>Attendance</Text>
           </View>
         </View>
 
-        <View style={styles.pickerContainer}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.monthPicker}>
-            {months.map((month, index) => (
+        <View style={styles.section}>
+          <View style={styles.infoHeaderRow}>
+            <Text style={styles.sectionTitle}>Worker profile</Text>
+            {isAdmin ? (
               <TouchableOpacity
-                key={month}
-                style={[styles.pickerButton, selectedMonth === index && styles.pickerButtonActive]}
-                onPress={() => setSelectedMonth(index)}
+                style={[
+                  styles.accessBadge,
+                  {
+                    backgroundColor: targetHasAccess ? '#DCFCE7' : '#F1F5F9',
+                  },
+                ]}
+                onPress={handleToggleAccess}
+                disabled={accessBusy}
+                accessibilityRole="button"
+                accessibilityLabel="Toggle edit access for this worker"
               >
+                <MaterialCommunityIcons
+                  name={
+                    targetHasAccess ? 'shield-check' : 'shield-lock-outline'
+                  }
+                  size={13}
+                  color={targetHasAccess ? '#15803D' : '#64748B'}
+                />
                 <Text
-                  style={[styles.pickerButtonText, selectedMonth === index && styles.pickerButtonTextActive]}
+                  style={[
+                    styles.accessBadgeText,
+                    { color: targetHasAccess ? '#15803D' : '#64748B' },
+                  ]}
                 >
-                  {month}
+                  {targetHasAccess ? 'Edit access' : 'Read only'}
                 </Text>
               </TouchableOpacity>
-            ))}
-          </ScrollView>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.yearPicker}>
-            {years.map((year) => (
-              <TouchableOpacity
-                key={year}
-                style={[styles.pickerButton, selectedYear === year && styles.pickerButtonActive]}
-                onPress={() => setSelectedYear(year)}
+            ) : (
+              <View
+                style={[
+                  styles.accessBadge,
+                  {
+                    backgroundColor: canEdit ? '#DCFCE7' : '#F1F5F9',
+                  },
+                ]}
               >
+                <MaterialCommunityIcons
+                  name={canEdit ? 'shield-check' : 'shield-lock-outline'}
+                  size={13}
+                  color={canEdit ? '#15803D' : '#64748B'}
+                />
                 <Text
-                  style={[styles.pickerButtonText, selectedYear === year && styles.pickerButtonTextActive]}
+                  style={[
+                    styles.accessBadgeText,
+                    { color: canEdit ? '#15803D' : '#64748B' },
+                  ]}
                 >
-                  {year}
+                  {canEdit ? 'Edit access' : 'Read only'}
+                </Text>
+              </View>
+            )}
+          </View>
+          <View style={styles.profileCard}>
+            {isEditing && canEdit ? (
+              <>
+                <Text style={styles.editLabel}>Name</Text>
+                <TextInput
+                  style={styles.profileInput}
+                  value={workerName}
+                  onChangeText={setWorkerName}
+                  placeholder="Full name"
+                  placeholderTextColor="#94A3B8"
+                />
+                <Text style={styles.editLabel}>Phone</Text>
+                <TextInput
+                  style={styles.profileInput}
+                  value={workerPhone}
+                  onChangeText={setWorkerPhone}
+                  keyboardType="phone-pad"
+                  placeholder="Phone number"
+                  placeholderTextColor="#94A3B8"
+                />
+                <Text style={styles.editLabel}>Email</Text>
+                <TextInput
+                  style={styles.profileInput}
+                  value={workerEmail}
+                  onChangeText={setWorkerEmail}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  placeholder="Email address"
+                  placeholderTextColor="#94A3B8"
+                />
+                <Text style={styles.editLabel}>Bio</Text>
+                <TextInput
+                  style={[styles.profileInput, styles.profileInputMultiline]}
+                  value={workerBio}
+                  onChangeText={setWorkerBio}
+                  multiline
+                  placeholder="Short bio visible to the team"
+                  placeholderTextColor="#94A3B8"
+                />
+                <Text style={styles.editLabel}>Designation</Text>
+                {isAdmin ? (
+                  <>
+                    <TouchableOpacity
+                      style={styles.dropdown}
+                      onPress={() => setRoleDropdownOpen((open) => !open)}
+                    >
+                      <Text style={styles.dropdownText}>
+                        {workerDesignation === 'manager'
+                          ? 'Manager'
+                          : workerDesignation === 'admin'
+                          ? 'Admin'
+                          : 'Employee'}
+                      </Text>
+                      <MaterialCommunityIcons
+                        name={roleDropdownOpen ? 'chevron-up' : 'chevron-down'}
+                        size={20}
+                        color="#64748B"
+                      />
+                    </TouchableOpacity>
+                    {roleDropdownOpen && (
+                      <View style={styles.dropdownMenu}>
+                        {['worker', 'manager', 'admin'].map((role) => {
+                          const active = workerDesignation === role;
+                          return (
+                            <TouchableOpacity
+                              key={role}
+                              style={styles.dropdownOption}
+                              onPress={() => {
+                                setWorkerDesignation(role);
+                                setRoleDropdownOpen(false);
+                              }}
+                            >
+                              <Text
+                                style={[
+                                  styles.dropdownOptionText,
+                                  active && {
+                                    color: theme.accent,
+                                    fontWeight: '800',
+                                  },
+                                ]}
+                              >
+                                {role === 'worker'
+                                  ? 'Employee'
+                                  : role === 'manager'
+                                  ? 'Manager'
+                                  : 'Admin'}
+                              </Text>
+                              {active && (
+                                <MaterialCommunityIcons
+                                  name="check"
+                                  size={16}
+                                  color={theme.accent}
+                                />
+                              )}
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    )}
+                  </>
+                ) : (
+                  <Text style={styles.profileLineValue}>
+                    {workerDesignation}
+                  </Text>
+                )}
+              </>
+            ) : (
+              <>
+                <View style={styles.profileLine}>
+                  <MaterialCommunityIcons name="email-outline" size={16} color="#64748B" />
+                  <Text style={styles.profileLineLabel}>Email</Text>
+                  <Text style={styles.profileLineValue}>
+                    {workerRow?.Email || 'Not set'}
+                  </Text>
+                </View>
+                <View style={styles.profileLine}>
+                  <MaterialCommunityIcons name="phone-outline" size={16} color="#64748B" />
+                  <Text style={styles.profileLineLabel}>Phone</Text>
+                  <Text style={styles.profileLineValue}>
+                    {workerRow?.Phone || 'Not set'}
+                  </Text>
+                </View>
+                <View style={styles.profileLine}>
+                  <MaterialCommunityIcons name="briefcase-outline" size={16} color="#64748B" />
+                  <Text style={styles.profileLineLabel}>Role</Text>
+                  <Text style={styles.profileLineValue}>{displayDesignation}</Text>
+                </View>
+                <View style={styles.profileLine}>
+                  <MaterialCommunityIcons name="text-account" size={16} color="#64748B" />
+                  <Text style={styles.profileLineLabel}>Bio</Text>
+                  <Text style={styles.profileLineValue}>
+                    {workerRow?.Bio || 'No bio added yet'}
+                  </Text>
+                </View>
+              </>
+            )}
+
+            {isEditing && canEdit && (
+              <TouchableOpacity
+                style={[styles.savePayButton, { backgroundColor: theme.accent }]}
+                onPress={handleSavePayRate}
+                disabled={saving}
+              >
+                {saving ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.savePayButtonText}>Save worker details</Text>
+                )}
+              </TouchableOpacity>
+            )}
+
+            {isAdmin && workerRow && (
+              <TouchableOpacity
+                style={[
+                  styles.accessAction,
+                  {
+                    backgroundColor: rowHasReadAccess(workerRow)
+                      ? '#FEF2F2'
+                      : theme.accentSoft,
+                    borderColor: rowHasReadAccess(workerRow)
+                      ? '#FECACA'
+                      : theme.accentBorder,
+                  },
+                ]}
+                onPress={handleToggleReadAccess}
+                disabled={accessBusy}
+              >
+                <MaterialCommunityIcons
+                  name={
+                    rowHasReadAccess(workerRow)
+                      ? 'book-open-variant'
+                      : 'book-open-outline'
+                  }
+                  size={16}
+                  color={rowHasReadAccess(workerRow) ? '#B91C1C' : theme.accentDark}
+                />
+                <Text
+                  style={[
+                    styles.accessActionText,
+                    {
+                      color: rowHasReadAccess(workerRow)
+                        ? '#B91C1C'
+                        : theme.accentDark,
+                    },
+                  ]}
+                >
+                  {rowHasReadAccess(workerRow)
+                    ? 'Revoke read access'
+                    : 'Give read access'}
                 </Text>
               </TouchableOpacity>
-            ))}
-          </ScrollView>
+            )}
+
+            {isAdmin && workerRow && (
+              <TouchableOpacity
+                style={[
+                  styles.accessAction,
+                  {
+                    backgroundColor: targetHasAccess ? '#FEF2F2' : theme.accentSoft,
+                    borderColor: targetHasAccess ? '#FECACA' : theme.accentBorder,
+                  },
+                ]}
+                onPress={handleToggleAccess}
+                disabled={accessBusy}
+              >
+                {accessBusy ? (
+                  <ActivityIndicator size="small" color={theme.accent} />
+                ) : (
+                  <>
+                    <MaterialCommunityIcons
+                      name={targetHasAccess ? 'pencil-lock' : 'pencil-outline'}
+                      size={16}
+                      color={targetHasAccess ? '#B91C1C' : theme.accentDark}
+                    />
+                    <Text
+                      style={[
+                        styles.accessActionText,
+                        { color: targetHasAccess ? '#B91C1C' : theme.accentDark },
+                      ]}
+                    >
+                      {targetHasAccess ? 'Revoke edit access' : 'Give edit access'}
+                    </Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            )}
+
+            {!canEdit && (
+              <View style={styles.readOnlyNotice}>
+                <MaterialCommunityIcons name="lock-outline" size={15} color="#92400E" />
+                <Text style={styles.readOnlyText}>
+                  You have read-only access. Ask an admin to give you edit
+                  access from the Workers tab.
+                </Text>
+              </View>
+            )}
+          </View>
         </View>
 
         <View style={styles.section}>
@@ -281,7 +774,7 @@ export default function WorkerDetailsScreen() {
           <View style={styles.payCard}>
             <View style={styles.payRow}>
               <Text style={styles.payLabel}>Pay Per Hour:</Text>
-              {isEditing && isAdmin ? (
+              {isEditing && canEdit ? (
                 <TextInput
                   style={styles.payInput}
                   value={payPerHour}
@@ -292,9 +785,17 @@ export default function WorkerDetailsScreen() {
                 <Text style={styles.payValue}>${payPerHour}/hr</Text>
               )}
             </View>
-            {isEditing && isAdmin && (
-              <TouchableOpacity style={styles.savePayButton} onPress={handleSavePayRate}>
-                <Text style={styles.savePayButtonText}>Save</Text>
+            {isEditing && canEdit && (
+              <TouchableOpacity
+                style={[styles.savePayButton, { backgroundColor: theme.accent }]}
+                onPress={handleSavePayRate}
+                disabled={saving}
+              >
+                {saving ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.savePayButtonText}>Save</Text>
+                )}
               </TouchableOpacity>
             )}
             <View style={styles.payRow}>
@@ -311,63 +812,87 @@ export default function WorkerDetailsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Attendance History</Text>
           <FlatList
-            data={clockings}
+            data={recentClockings}
             renderItem={renderClockingItem}
-            keyExtractor={(item, index) => index.toString()}
+            keyExtractor={(item, index) => `${item._row || index}`}
             scrollEnabled={false}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>No attendance records for selected month</Text>
+                <Text style={styles.emptyText}>No recent clock-ins</Text>
               </View>
             }
           />
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Drawer Money</Text>
-          <FlatList
-            data={drawerMoney}
-            renderItem={renderDrawerItem}
-            keyExtractor={(item, index) => index.toString()}
-            scrollEnabled={false}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Text style={styles.emptyText}>No drawer money records</Text>
-              </View>
+          <TouchableOpacity
+            style={styles.showMore}
+            onPress={() =>
+              router.push(
+                `/clock-history?workerId=${encodeURIComponent(
+                  resolvedId || ''
+                )}` as any
+              )
             }
-          />
+          >
+            <Text style={[styles.showMoreText, { color: theme.accent }]}>
+              Show more
+            </Text>
+            <MaterialCommunityIcons
+              name="chevron-right"
+              size={16}
+              color={theme.accent}
+            />
+          </TouchableOpacity>
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Analytics</Text>
-          <View style={styles.chartContainer}>
-            <Text style={styles.chartTitle}>Hours Worked by Day</Text>
-            {chartData.datasets[0].data.length > 0 ? (
-              <BarChart
-                data={chartData}
-                width={screenWidth - 64}
-                height={220}
-                yAxisLabel=""
-                yAxisSuffix="h"
-                chartConfig={{
-                  backgroundColor: '#fff',
-                  backgroundGradientFrom: '#fff',
-                  backgroundGradientTo: '#fff',
-                  decimalPlaces: 1,
-                  color: (opacity = 1) => `rgba(0, 175, 91, ${opacity})`,
-                  labelColor: (opacity = 1) => `rgba(51, 51, 51, ${opacity})`,
-                  style: { borderRadius: 16 },
-                  propsForDots: { r: '4', strokeWidth: '2', stroke: '#00af5bff' },
-                }}
-                style={{ borderRadius: 16 }}
-              />
-            ) : (
-              <View style={styles.emptyChart}>
-                <Text style={styles.emptyText}>No data to display</Text>
-              </View>
-            )}
+          <Text style={styles.sectionTitle}>Work Performance</Text>
+          <View style={styles.statsGrid}>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>On-time arrivals</Text>
+              <Text style={styles.statGridValue}>{performance.onTimeRate}%</Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Late clock-ins</Text>
+              <Text style={styles.statGridValue}>{performance.lateCount}</Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Hours worked</Text>
+              <Text style={styles.statGridValue}>
+                {performance.hoursWorked.toFixed(2)}h
+              </Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Assigned hours</Text>
+              <Text style={styles.statGridValue}>
+                {performance.assignedHours.toFixed(1)}h
+              </Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Pay / hour</Text>
+              <Text style={styles.statGridValue}>
+                ${performance.payPerHour.toFixed(2)}
+              </Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Pay this month</Text>
+              <Text style={styles.statGridValue}>
+                ${performance.pay.toFixed(2)}
+              </Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Days worked</Text>
+              <Text style={styles.statGridValue}>{performance.daysWorked}</Text>
+            </View>
+            <View style={styles.statGridCard}>
+              <Text style={styles.statGridLabel}>Attendance</Text>
+              <Text style={styles.statGridValue}>
+                {performance.attendanceRate}%
+              </Text>
+            </View>
           </View>
+        </View>
 
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Stats</Text>
           <View style={styles.statsGrid}>
             <View style={styles.statGridCard}>
               <Text style={styles.statGridLabel}>Avg Hours/Day</Text>
@@ -494,6 +1019,106 @@ const styles = StyleSheet.create({
     color: '#333',
     marginBottom: 12,
   },
+  infoHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  accessBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 9,
+    marginBottom: 12,
+  },
+  accessBadgeText: { fontSize: 10, fontWeight: '700', marginLeft: 4 },
+  profileCard: { backgroundColor: '#fff', padding: 16, borderRadius: 12 },
+  profileLine: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 7,
+  },
+  profileLineLabel: {
+    fontSize: 12,
+    color: '#64748B',
+    width: 48,
+    marginLeft: 8,
+  },
+  profileLineValue: { flex: 1, fontSize: 13, color: '#1E293B', fontWeight: '500' },
+  editLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  profileInput: {
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 9,
+    padding: 10,
+    fontSize: 13,
+    color: '#1E293B',
+  },
+  profileInputMultiline: { height: 72, textAlignVertical: 'top' },
+  roleChipRow: { flexDirection: 'row', marginTop: 2, marginBottom: 4 },
+  roleChip: {
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    marginRight: 8,
+  },
+  roleChipText: { fontSize: 11, fontWeight: '700', color: '#475569' },
+  dropdown: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    backgroundColor: '#F8FAFC',
+  },
+  dropdownText: { fontSize: 13, color: '#1E293B', fontWeight: '600' },
+  dropdownMenu: {
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    marginTop: 6,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+  },
+  dropdownOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  dropdownOptionText: { fontSize: 13, color: '#475569', fontWeight: '600' },
+  accessAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingVertical: 10,
+    marginTop: 10,
+  },
+  accessActionText: { fontSize: 12, fontWeight: '700', marginLeft: 6 },
+  readOnlyNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF3E2',
+    borderRadius: 10,
+    padding: 10,
+    marginTop: 10,
+  },
+  readOnlyText: { flex: 1, fontSize: 11, color: '#92400E', marginLeft: 7 },
   payCard: {
     backgroundColor: '#fff',
     padding: 16,
@@ -700,5 +1325,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#999',
     fontStyle: 'italic',
+  },
+  showMore: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    marginTop: 4,
+  },
+  showMoreText: {
+    fontSize: 12,
+    fontWeight: '800',
+    marginRight: 2,
   },
 });

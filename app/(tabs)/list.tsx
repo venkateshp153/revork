@@ -42,6 +42,7 @@ export default function List() {
 
   const handleCloseGeneratedList = () => {
     setShowGeneratedList(false);
+    setGeneratedListText("");
   };
 
   const handleShare = async () => {
@@ -50,8 +51,13 @@ export default function List() {
         message: `List of things we need at store:\n\n${generatedListText}`,
         title: "My Grocery List",
       });
-    } catch {
-      Alert.alert("Error", "Failed to share the list");
+    } catch (error) {
+      Alert.alert(
+        "Error",
+        error instanceof Error
+          ? `Failed to share the list: ${error.message}`
+          : "Failed to share the list"
+      );
     }
   };
 
@@ -78,9 +84,11 @@ export default function List() {
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Make a List</Text>
         {listItems.length > 0 && (
-          <TouchableOpacity 
+          <TouchableOpacity
             onPress={handleClearList}
             style={styles.clearButton}
+            accessibilityRole="button"
+            accessibilityLabel="Clear entire list"
           >
             <Text style={styles.clearButtonText}>Clear</Text>
           </TouchableOpacity>
@@ -89,7 +97,7 @@ export default function List() {
 
       <FlatList
         data={listItems}
-        keyExtractor={(item) => item.Id}
+        keyExtractor={(item, index) => item.Id || `list-${index}`}
         renderItem={({ item }) => (
           <View style={styles.itemContainer}>
             <Text style={styles.itemName}>{item.GroceryItem}</Text>
@@ -99,11 +107,14 @@ export default function List() {
                 onPress={() => dispatch(decrementQuantity(item.Id))}
                 style={styles.quantityButton}
                 disabled={item.quantity <= 1}
+                accessibilityRole="button"
+                accessibilityLabel={`Decrease quantity of ${item.GroceryItem}`}
+                accessibilityState={{ disabled: item.quantity <= 1 }}
               >
-                <MaterialCommunityIcons 
-                  name="minus" 
-                  size={20} 
-                  color={item.quantity <= 1 ? "#cccccc" : "white"} 
+                <MaterialCommunityIcons
+                  name="minus"
+                  size={20}
+                  color={item.quantity <= 1 ? Colors.disabled : Colors.onPrimary}
                 />
               </TouchableOpacity>
 
@@ -112,33 +123,41 @@ export default function List() {
               <TouchableOpacity
                 onPress={() => dispatch(incrementQuantity(item.Id))}
                 style={styles.quantityButton}
+                accessibilityRole="button"
+                accessibilityLabel={`Increase quantity of ${item.GroceryItem}`}
               >
-                <MaterialCommunityIcons name="plus" size={20} color="white" />
+                <MaterialCommunityIcons
+                  name="plus"
+                  size={20}
+                  color={Colors.onPrimary}
+                />
               </TouchableOpacity>
             </View>
 
             <TouchableOpacity
               onPress={() => dispatch(removeFromList(item.Id))}
               style={styles.deleteButton}
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${item.GroceryItem} from the list`}
             >
               <MaterialCommunityIcons
                 name="delete"
                 size={20}
-                color="#fc5050"
+                color={Colors.danger}
               />
             </TouchableOpacity>
           </View>
         )}
         contentContainerStyle={[
           styles.listContent,
-          listItems.length === 0 && { flex: 1 }
+          listItems.length === 0 && { flex: 1 },
         ]}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <MaterialCommunityIcons
               name="cart-outline"
               size={50}
-              color="#CBD5E0"
+              color={Colors.disabled}
             />
             <Text style={styles.emptyText}>Your list is empty</Text>
             <Text style={styles.emptySubText}>
@@ -152,6 +171,8 @@ export default function List() {
         <TouchableOpacity
           onPress={handleGenerate}
           style={styles.generateButton}
+          accessibilityRole="button"
+          accessibilityLabel="Generate list"
         >
           <Text style={styles.generateButtonText}>Generate List</Text>
         </TouchableOpacity>
@@ -164,13 +185,27 @@ export default function List() {
         onRequestClose={handleCloseGeneratedList}
       >
         <View style={styles.modalContainer}>
-          <BlurView intensity={90} tint="light" style={StyleSheet.absoluteFill}>
-            <TouchableOpacity
-              style={styles.blurTouchable}
-              activeOpacity={1}
-              onPress={handleCloseGeneratedList}
+          {/* iOS renders a true blur; Android falls back to a translucent
+              dark overlay since BlurView support there is unreliable. */}
+          {Platform.OS === "ios" ? (
+            <BlurView
+              intensity={90}
+              tint="light"
+              style={StyleSheet.absoluteFill}
             />
-          </BlurView>
+          ) : (
+            <View
+              style={[StyleSheet.absoluteFill, styles.overlayFallback]}
+            />
+          )}
+
+          <TouchableOpacity
+            style={styles.blurTouchable}
+            activeOpacity={1}
+            onPress={handleCloseGeneratedList}
+            accessibilityRole="button"
+            accessibilityLabel="Close generated list"
+          />
 
           <View style={styles.generatedListContainer}>
             <View style={styles.generatedListHeader}>
@@ -180,16 +215,18 @@ export default function List() {
               <TouchableOpacity
                 onPress={handleCloseGeneratedList}
                 style={styles.closeButton}
+                accessibilityRole="button"
+                accessibilityLabel="Close generated list"
               >
                 <MaterialCommunityIcons
                   name="close"
                   size={24}
-                  color="#c2c2c2"
+                  color={Colors.subtleText}
                 />
               </TouchableOpacity>
             </View>
 
-            <ScrollView 
+            <ScrollView
               style={styles.generatedListScroll}
               contentContainerStyle={{ paddingBottom: 16 }}
             >
@@ -200,11 +237,13 @@ export default function List() {
               <TouchableOpacity
                 onPress={handleShare}
                 style={styles.actionButton}
+                accessibilityRole="button"
+                accessibilityLabel="Share list"
               >
                 <MaterialCommunityIcons
                   name="share-variant"
                   size={24}
-                  color="white"
+                  color={Colors.onPrimary}
                 />
                 <Text style={styles.actionButtonText}>Share List</Text>
               </TouchableOpacity>
@@ -220,32 +259,32 @@ export default function List() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#F8FAFC",
+    backgroundColor: Colors.screenBackground,
   },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     padding: 24,
     paddingBottom: 16,
-    backgroundColor: "#FFFFFF",
+    backgroundColor: Colors.surface,
     borderBottomWidth: 1,
-    borderBottomColor: "#E2E8F0",
+    borderBottomColor: Colors.border,
   },
   headerTitle: {
     fontSize: 22,
     fontWeight: "700",
-    color: "#1E293B",
+    color: Colors.heading,
   },
   clearButton: {
-    backgroundColor: '#E1F5FE',
+    backgroundColor: Colors.clearBtnBackground,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 20,
   },
   clearButtonText: {
-    color: '#039BE5',
-    fontWeight: '600',
+    color: Colors.clearBtnText,
+    fontWeight: "600",
   },
   listContent: {
     paddingBottom: 100,
@@ -255,7 +294,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#FFFFFF",
+    backgroundColor: Colors.surface,
     borderRadius: 12,
     padding: 16,
     marginHorizontal: 16,
@@ -269,7 +308,7 @@ const styles = StyleSheet.create({
   itemName: {
     flex: 1,
     fontSize: 16,
-    color: "#1E293B",
+    color: Colors.heading,
     fontWeight: "500",
   },
   quantityControls: {
@@ -278,7 +317,7 @@ const styles = StyleSheet.create({
     marginHorizontal: 10,
   },
   quantityButton: {
-    backgroundColor: "#cecdcf",
+    backgroundColor: Colors.controlsBackground,
     borderRadius: 20,
     width: 30,
     height: 30,
@@ -291,7 +330,7 @@ const styles = StyleSheet.create({
     minWidth: 24,
     textAlign: "center",
     fontWeight: "600",
-    color: "#1E293B",
+    color: Colors.heading,
   },
   deleteButton: {
     padding: 8,
@@ -314,7 +353,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   generateButtonText: {
-    color: "white",
+    color: Colors.onPrimary,
     fontSize: 18,
     fontWeight: "600",
   },
@@ -326,24 +365,27 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 18,
-    color: "#64748B",
+    color: Colors.mutedText,
     marginTop: 16,
     fontWeight: "500",
   },
   emptySubText: {
     fontSize: 14,
-    color: "#94A3B8",
+    color: Colors.subtleText,
     marginTop: 8,
   },
   modalContainer: {
     flex: 1,
-    justifyContent: 'flex-end',
+    justifyContent: "flex-end",
+  },
+  overlayFallback: {
+    backgroundColor: Colors.overlayFallback,
   },
   blurTouchable: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
   },
   generatedListContainer: {
-    backgroundColor: "#FFFFFF",
+    backgroundColor: Colors.surface,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 24,
@@ -364,7 +406,7 @@ const styles = StyleSheet.create({
   generatedListTitle: {
     fontSize: 20,
     fontWeight: "700",
-    color: "#1E293B",
+    color: Colors.heading,
     flex: 1,
     paddingRight: 16,
   },
@@ -376,7 +418,7 @@ const styles = StyleSheet.create({
   },
   generatedListText: {
     fontSize: 16,
-    color: "#334155",
+    color: Colors.bodyText,
     lineHeight: 24,
   },
   actionButtonsContainer: {
@@ -388,17 +430,17 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingVertical: 12,
     borderRadius: 8,
-    backgroundColor: "#10B981",
+    backgroundColor: Colors.success,
   },
   actionButtonText: {
-    color: "white",
+    color: Colors.onPrimary,
     fontSize: 16,
     fontWeight: "600",
     marginLeft: 8,
   },
   poweredByText: {
     textAlign: "center",
-    color: "#94A3B8",
+    color: Colors.subtleText,
     fontSize: 12,
     marginTop: 8,
   },

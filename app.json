@@ -9,6 +9,7 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
+      "bundleIdentifier": "com.venky534.revork",
       "supportsTablet": true
     },
     "android": {
@@ -50,7 +51,22 @@
           "iosUrlScheme": "com.googleusercontent.apps.1058954361230-ksl2nk7actihrbtd1nsgo9rldd2oup2u"
         }
       ],
-      "@react-native-community/datetimepicker"
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Revork to use your location to build and optimize delivery routes.",
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": false
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Revork to attach delivery proof photos and scan address lists from your gallery.",
+          "cameraPermission": "Allow Revork to take delivery proof photos and scan address lists."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

@@ -1,8 +1,9 @@
 import { Tabs, useRouter } from 'expo-router';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { StyleSheet, Animated, View } from 'react-native';
-import { useRef } from 'react';
+import { useRef, useEffect } from 'react';
 import { Colors } from '@/assets/constants/colors';
+import { getRoleTheme } from '@/assets/constants/roleTheme';
 import { useSelector } from 'react-redux';
 import { RootState } from '@/redux/store';
 
@@ -14,10 +15,18 @@ export default function TabLayout() {
   const notificationsAnim = useRef(new Animated.Value(1)).current;
   const profileAnim = useRef(new Animated.Value(1)).current;
   const user = useSelector((state: RootState) => state.user);
+  const roleTheme = getRoleTheme(
+    user.profile?.designation || user.designation,
+    user.designation === 'worker' || user.workerProfile?.designation === 'worker'
+  );
 
-  if (!user.isAuthenticated || !user.profile) {
-    router.replace('/(auth)/login');
-  }
+  // Redirect unauthenticated users from an effect — calling router.replace()
+  // during render causes the "setState during render" warning/errors.
+  useEffect(() => {
+    if (!user.isAuthenticated || (!user.profile && !user.workerProfile)) {
+      router.replace('/(auth)/login');
+    }
+  }, [user.isAuthenticated, user.profile, user.workerProfile, router]);
 
   const animateTab = (anim: Animated.Value) => {
     anim.setValue(0.92);
@@ -33,7 +42,7 @@ export default function TabLayout() {
         screenOptions={{
           headerShown: false,
           tabBarHideOnKeyboard: true,
-          tabBarActiveTintColor: Colors.primary,
+          tabBarActiveTintColor: roleTheme.accent,
           tabBarInactiveTintColor: '#c3c9d1ff',
           tabBarStyle: styles.tabBar,
           tabBarLabelStyle: styles.label,
@@ -123,7 +132,7 @@ export default function TabLayout() {
           />
         )}
         <Tabs.Screen
-          name="analytics"
+          name="routes"
           listeners={{
             tabPress: () => animateTab(analyticsAnim),
           }}
@@ -142,7 +151,7 @@ export default function TabLayout() {
                   }
                 ]}
               >
-                Analytics
+                Route
               </Animated.Text>
             ),
             tabBarIcon: ({ focused, color }: { focused: boolean; color: string }) => (
@@ -154,7 +163,7 @@ export default function TabLayout() {
                 })
               }}>
                 <MaterialCommunityIcons
-                  name={focused ? 'chart-bar' : 'chart-bar'}
+                  name={focused ? 'map-marker-path' : 'map-marker-path'}
                   size={28}
                   color={color}
                 />

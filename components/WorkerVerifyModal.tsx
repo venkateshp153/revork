@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -32,6 +32,18 @@ export default function WorkerVerifyModal({
   const [email, setEmail] = useState('');
   const [verifyError, setVerifyError] = useState('');
   const [loading, setLoading] = useState(false);
+
+  // Reset the form each time the modal opens so a previous worker's details
+  // (or a stale name) can never leak into the next join attempt.
+  useEffect(() => {
+    if (visible) {
+      setName(workerData?.name || '');
+      setPhone('');
+      setEmail('');
+      setVerifyError('');
+      setLoading(false);
+    }
+  }, [visible, workerData?.name]);
 
   const handleVerify = () => {
     if (!name.trim() || !phone.trim() || !email.trim()) {

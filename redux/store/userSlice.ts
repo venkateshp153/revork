@@ -9,6 +9,10 @@ interface UserProfile {
   companyEmail: string;
   sheetId?: string;
   folderId?: string;
+  folderName?: string;
+  folderUrl?: string;
+  folderPath?: string;
+  sheetUrl?: string;
   joinLink?: string;
 }
 
@@ -76,6 +80,10 @@ const userSlice = createSlice({
       companyEmail?: string;
       sheetId?: string;
       folderId?: string;
+      folderName?: string;
+      folderUrl?: string;
+      folderPath?: string;
+      sheetUrl?: string;
       isNewUser: boolean;
     }>) => {
       state.uid = action.payload.uid;
@@ -95,6 +103,10 @@ const userSlice = createSlice({
           companyEmail: action.payload.companyEmail || '',
           sheetId: action.payload.sheetId || '',
           folderId: action.payload.folderId || '',
+          folderName: action.payload.folderName || '',
+          folderUrl: action.payload.folderUrl || '',
+          folderPath: action.payload.folderPath || '',
+          sheetUrl: action.payload.sheetUrl || '',
         };
         state.sheetId = action.payload.sheetId || null;
         state.folderId = action.payload.folderId || null;
@@ -103,6 +115,7 @@ const userSlice = createSlice({
     setProfile: (state, action: PayloadAction<UserProfile>) => {
       state.profile = action.payload;
       state.designation = action.payload.designation || 'admin';
+      state.isAuthenticated = true; // completing setup implies a signed-in session
       state.isNewUser = false;
       state.sheetId = action.payload.sheetId || null;
       state.folderId = action.payload.folderId || null;

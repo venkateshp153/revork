@@ -2,7 +2,7 @@ type RootStackParamList = {
   '(tabs)': undefined;
   '(tabs)/home': undefined;
   '(tabs)/workers': undefined;
-  '(tabs)/analytics': undefined;
+  '(tabs)/routes': undefined;
   '(tabs)/notifications': undefined;
   '(tabs)/profile': undefined;
   '(tabs)/list': undefined;

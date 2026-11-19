@@ -1,25 +1,36 @@
 import React, { ReactNode, useEffect } from 'react';
-import { Provider } from 'react-redux';
-import { PersistGate } from 'redux-persist/integration/react';
+import { Provider, useDispatch } from 'react-redux';
 import { store, persistor } from '../store';
-import { useDispatch } from 'react-redux';
 import { setHasHydrated } from '../store/grocerySlice';
 
 interface ReduxProviderProps {
   children: ReactNode;
 }
 
-// Component to handle hydration
+// Marks the persisted state as hydrated once redux-persist has finished
+// restoring the store from AsyncStorage.
 const HydrationHandler = ({ children }: { children: ReactNode }) => {
   const dispatch = useDispatch();
 
   useEffect(() => {
-    const handleHydration = async () => {
-      await persistor.persist();
+    let unsubscribe: (() => void) | undefined;
+
+    const markHydrated = () => {
       dispatch(setHasHydrated(true));
+      unsubscribe?.();
     };
-    
-    handleHydration();
+
+    if (persistor.getState().bootstrapped) {
+      markHydrated();
+    } else {
+      unsubscribe = persistor.subscribe(() => {
+        if (persistor.getState().bootstrapped) {
+          markHydrated();
+        }
+      });
+    }
+
+    return () => unsubscribe?.();
   }, [dispatch]);
 
   return <>{children}</>;
@@ -28,17 +39,7 @@ const HydrationHandler = ({ children }: { children: ReactNode }) => {
 export const ReduxProvider = ({ children }: ReduxProviderProps) => {
   return (
     <Provider store={store}>
-      <PersistGate 
-        loading={null} 
-        persistor={persistor}
-        onBeforeLift={() => {
-          // Optional: You can add any pre-hydration logic here
-        }}
-      >
-        <HydrationHandler>
-          {children}
-        </HydrationHandler>
-      </PersistGate>
+      <HydrationHandler>{children}</HydrationHandler>
     </Provider>
   );
 };

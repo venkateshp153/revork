@@ -17,9 +17,22 @@ import { useSelector } from 'react-redux';
 import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
 import { RootState } from '@/redux/store';
+import { getGoogleAccessToken, ensurePublicReadAccess } from '@/src/utils/sheets';
+import { buildWorkerJoinLink } from '@/src/utils/joinLink';
+import { addWorkerToSheet, ensureWorkerEditAccess } from '@/src/utils/workerManagement';
 
 
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+// LayoutAnimation is enabled by default under the New Architecture (Fabric)
+// and calling the legacy toggle there only produces a warning.
+const isNewArchitecture = () =>
+  typeof globalThis !== 'undefined' &&
+  !!(globalThis as any).nativeFabricUIManager;
+
+if (
+  Platform.OS === 'android' &&
+  !isNewArchitecture() &&
+  UIManager.setLayoutAnimationEnabledExperimental
+) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
@@ -83,35 +96,47 @@ export default function GenerateJoinLinkModal({ visible, onClose }: GenerateJoin
         return;
       }
 
-      const workerData = [
-        workerId,
-        workerName.trim(),
-        workerEmail.trim().toLowerCase(),
-        workerPhone.replace(/\D/g, ''),
-        '0',
-        'worker',
-        new Date().toISOString().split('T')[0],
-        'pending',
-      ];
-
-      const response = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Workers:append?key=${process.env.EXPO_PUBLIC_API_KEY}&valueInputOption=RAW`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            values: [workerData],
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error('Failed to save worker data');
+      const token = await getGoogleAccessToken(true);
+      if (!token) {
+        throw new Error('Sign in with Google to add a teammate.');
       }
 
-      const joinLink = `workforce://join?sheetId=${sheetId}&token=anyone&companyId=${user.uid}&workerName=${encodeURIComponent(workerName)}&workerEmail=${encodeURIComponent(workerEmail)}&workerPhone=${encodeURIComponent(workerPhone)}`;
+      // Save through the shared writer so the row follows the sheet's actual
+      // header order and the WorkerID is guaranteed unique. The link is then
+      // built from the id that was really written to the row.
+      const trimmedName = workerName.trim();
+      const nameParts = trimmedName.split(/\s+/);
+      const savedWorkerId = await addWorkerToSheet(sheetId, token, {
+        firstName: nameParts[0] || trimmedName,
+        lastName: nameParts.slice(1).join(' '),
+        phone: workerPhone,
+        email: workerEmail,
+        designation: 'worker',
+      });
+      setWorkerId(savedWorkerId);
+
+      // Bind read access to the worker's own Google account so the link keeps
+      // working even if the workspace is no longer shared publicly.
+      await ensurePublicReadAccess(sheetId, token);
+      const access = await ensureWorkerEditAccess(
+        sheetId,
+        token,
+        workerEmail.trim().toLowerCase()
+      );
+      if (!access.shared) {
+        Alert.alert(
+          'Sharing warning',
+          `The worker was added, but Google could not grant ${workerEmail.trim()} edit access${
+            access.error ? ` (${access.error})` : ''
+          }. The link may not allow clock-in until the sheet is shared with that email as Editor.`
+        );
+      }
+
+      const joinLink = buildWorkerJoinLink({
+        sheetId,
+        workerId: savedWorkerId,
+        companyId: user.uid,
+      });
       setGeneratedLink(joinLink);
       setStep(2);
     } catch (error: any) {
