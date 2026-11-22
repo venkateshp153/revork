@@ -19,6 +19,8 @@ interface WorkerVerifyModalProps {
     email: string;
     phone: string;
   } | null;
+  /** Email of the Google account the user selected in the account picker. */
+  googleEmail?: string;
 }
 
 export default function WorkerVerifyModal({
@@ -26,6 +28,7 @@ export default function WorkerVerifyModal({
   onClose,
   onVerify,
   workerData,
+  googleEmail = '',
 }: WorkerVerifyModalProps) {
   const [name, setName] = useState(workerData?.name || '');
   const [phone, setPhone] = useState('');
@@ -38,12 +41,13 @@ export default function WorkerVerifyModal({
   useEffect(() => {
     if (visible) {
       setName(workerData?.name || '');
-      setPhone('');
-      setEmail('');
+      setPhone(workerData?.phone || '');
+      // Prefer the sheet record; fall back to the selected Google account.
+      setEmail(workerData?.email || googleEmail || '');
       setVerifyError('');
       setLoading(false);
     }
-  }, [visible, workerData?.name]);
+  }, [visible, workerData?.name, workerData?.phone, workerData?.email, googleEmail]);
 
   const handleVerify = () => {
     if (!name.trim() || !phone.trim() || !email.trim()) {

@@ -36,6 +36,10 @@ export interface SavedRoute {
   updatedAt: number;
   startedAt?: number;
   completedAt?: number;
+  /** When the driver paused the route. */
+  pausedAt?: number;
+  /** Total time spent paused, excluded from the running timer. */
+  totalPausedMs?: number;
 }
 
 export interface RouteState {
@@ -124,6 +128,7 @@ function normalizeStop(value: any, index: number): RouteStop | null {
     ...(typeof value.legDistanceText === 'string'
       ? { legDistanceText: value.legDistanceText }
       : {}),
+    ...(value.priority === true ? { priority: true } : {}),
   };
 }
 
@@ -139,14 +144,102 @@ function normalizeStatus(value: any): RouteStatus {
   return 'draft';
 }
 
+/** Normalizes an address so spacing, case and punctuation cannot hide a dup. */
+export function normalizeAddressKey(value?: string): string {
+  return (value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function routeStopKey(stop: RouteStop): string {
+  const address = normalizeAddressKey(stop.address);
+  if (address) return `addr:${address}`;
+  if (stop.locationId) return `id:${stop.locationId}`;
+  return `geo:${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`;
+}
+
+/**
+ * Collapses repeated stops that point at the same address. The first stop wins
+ * its position; any delivered/assignment details from a later duplicate are
+ * merged in so progress is not lost.
+ */
+export function dedupeRouteStops(stops: RouteStop[]): RouteStop[] {
+  const seen = new Map<string, number>();
+  const result: RouteStop[] = [];
+
+  stops.forEach((stop) => {
+    const key = routeStopKey(stop);
+    const existingIndex = seen.get(key);
+    if (existingIndex === undefined) {
+      seen.set(key, result.length);
+      result.push(stop);
+      return;
+    }
+
+    const current = result[existingIndex];
+    const delivered = current.delivered || stop.delivered;
+    result[existingIndex] = {
+      ...current,
+      ...(delivered
+        ? {
+            delivered: true,
+            ...(current.deliveredAt || stop.deliveredAt
+              ? { deliveredAt: current.deliveredAt || stop.deliveredAt }
+              : {}),
+          }
+        : {}),
+      ...(current.locationId || stop.locationId
+        ? { locationId: current.locationId || stop.locationId }
+        : {}),
+      ...(current.deliveryId || stop.deliveryId
+        ? { deliveryId: current.deliveryId || stop.deliveryId }
+        : {}),
+      ...(current.contactName || stop.contactName
+        ? { contactName: current.contactName || stop.contactName }
+        : {}),
+      ...(current.phone || stop.phone
+        ? { phone: current.phone || stop.phone }
+        : {}),
+      ...(current.note || stop.note
+        ? { note: current.note || stop.note }
+        : {}),
+      ...(typeof current.orderCount === 'number' && current.orderCount > 0
+        ? { orderCount: current.orderCount }
+        : typeof stop.orderCount === 'number' && stop.orderCount > 0
+        ? { orderCount: stop.orderCount }
+        : {}),
+      ...(current.priority || stop.priority ? { priority: true } : {}),
+    };
+  });
+
+  return result;
+}
+
+/**
+ * Pending high-priority stops move to the front so the driver delivers them
+ * first. Delivered stops keep their place.
+ */
+export function sortPriorityStops(stops: RouteStop[]): RouteStop[] {
+  const priorityPending = stops.filter(
+    (stop) => stop.priority && !stop.delivered
+  );
+  if (priorityPending.length === 0) return stops;
+  const rest = stops.filter((stop) => !(stop.priority && !stop.delivered));
+  return [...priorityPending, ...rest];
+}
+
 export function normalizeRoute(value: any): SavedRoute | null {
   if (!value || typeof value !== 'object') return null;
   if (typeof value.id !== 'string') return null;
 
   const stops = Array.isArray(value.stops)
-    ? (value.stops
-        .map((stop: any, index: number) => normalizeStop(stop, index))
-        .filter(Boolean) as RouteStop[])
+    ? dedupeRouteStops(
+        value.stops
+          .map((stop: any, index: number) => normalizeStop(stop, index))
+          .filter(Boolean) as RouteStop[]
+      )
     : [];
   const now = Date.now();
 
@@ -178,6 +271,10 @@ export function normalizeRoute(value: any): SavedRoute | null {
     ...(isFiniteNumber(value.startedAt) ? { startedAt: value.startedAt } : {}),
     ...(isFiniteNumber(value.completedAt)
       ? { completedAt: value.completedAt }
+      : {}),
+    ...(isFiniteNumber(value.pausedAt) ? { pausedAt: value.pausedAt } : {}),
+    ...(isFiniteNumber(value.totalPausedMs)
+      ? { totalPausedMs: value.totalPausedMs }
       : {}),
   };
 }
@@ -211,9 +308,11 @@ export async function loadRouteState(): Promise<RouteState> {
       const legacy = JSON.parse(legacyRaw);
       const route = createRoute('My route');
       route.stops = Array.isArray(legacy?.stops)
-        ? (legacy.stops
-            .map((stop: any, index: number) => normalizeStop(stop, index))
-            .filter(Boolean) as RouteStop[])
+        ? dedupeRouteStops(
+            legacy.stops
+              .map((stop: any, index: number) => normalizeStop(stop, index))
+              .filter(Boolean) as RouteStop[]
+          )
         : [];
       route.start = normalizeLocation(legacy?.start);
       route.end = normalizeLocation(legacy?.end);
@@ -238,7 +337,10 @@ export async function loadRouteState(): Promise<RouteState> {
 export async function saveRouteState(state: RouteState): Promise<void> {
   try {
     const payload: RouteState = {
-      routes: state.routes,
+      routes: state.routes.map((route) => ({
+        ...route,
+        stops: dedupeRouteStops(route.stops),
+      })),
       activeId:
         state.activeId &&
         state.routes.some((route) => route.id === state.activeId)

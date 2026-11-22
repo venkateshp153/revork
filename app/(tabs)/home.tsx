@@ -1507,12 +1507,12 @@ export default function HomeScreen() {
 
             <TouchableOpacity
               style={[
-                styles.modalPrimary,
-                { backgroundColor: theme.accent, marginTop: 12 },
+                styles.dayDetailOkButton,
+                { backgroundColor: theme.accent },
               ]}
               onPress={() => setDayDetail(null)}
             >
-              <Text style={styles.modalPrimaryText}>Close</Text>
+              <Text style={styles.modalPrimaryText}>OK</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -2083,6 +2083,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   modalPrimaryText: { color: '#fff', fontWeight: '800', fontSize: 13 },
+  dayDetailOkButton: {
+    alignSelf: 'stretch',
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+  },
 
   assignOverlay: {
     flex: 1,

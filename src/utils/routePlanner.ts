@@ -37,6 +37,8 @@ export interface RouteStop extends RouteLocation {
   etaText?: string;
   /** Distance of the leg that arrives at this stop. */
   legDistanceText?: string;
+  /** Marked by the driver as high priority / deliver first. */
+  priority?: boolean;
 }
 
 export interface PlaceSuggestion {

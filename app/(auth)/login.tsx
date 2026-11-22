@@ -23,9 +23,8 @@ import { findAnyWorkspaceFolder, findFolderByName, findSheetInFolder } from '@/s
 import { createGoogleDriveStructure } from '@/src/utils/createGoogleDriveStructure';
 import { signInWithGoogle, checkOrCreateUser, saveWorkerToTracking, updateCompanyTracking, updateUserDriveFolder } from '@/assets/services/firebaseService';
 import { ensureAdminWorkerRow } from '@/src/utils/workerManagement';
-import { ensurePublicReadAccess, getGoogleAccessToken } from '@/src/utils/sheets';
+import { ensurePublicReadAccess } from '@/src/utils/sheets';
 import {
-  clearGoogleSession,
   resolveGoogleEmail,
   signInWithGoogleWorkspace,
 } from '@/src/services/googleAuth';
@@ -82,6 +81,12 @@ export default function LoginScreen() {
   const [joinLoadingVisible, setJoinLoadingVisible] = useState(false);
   const [fetchedWorkerData, setFetchedWorkerData] = useState<any>(null);
   const [fetchedWorkerCandidates, setFetchedWorkerCandidates] = useState<any[]>([]);
+  const [verifiedGoogleEmail, setVerifiedGoogleEmail] = useState('');
+  const [pendingJoin, setPendingJoin] = useState<{
+    sheetId: string;
+    companyId: string;
+    workerId: string;
+  } | null>(null);
   const [inlineError, setInlineError] = useState('');
   // Popup shown while logging in a returning (already registered) account
   const [existingAccountPopup, setExistingAccountPopup] = useState(false);
@@ -138,14 +143,25 @@ export default function LoginScreen() {
       const workersUrlFor = (id: string) =>
         `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Workers`;
 
-      // 1. Identify the worker's Google account first. The spreadsheet is
-      //    shared with a specific email, so this is the account that must be
-      //    used. (The account is also used to read private sheets.)
-      let googleToken = await getGoogleAccessToken(true);
-      let googleEmail = googleToken
-        ? (await resolveGoogleEmail(googleToken)) || ''
-        : '';
-      let googleScopes: string[] = [];
+      // 1. Always show the device Google account picker so the employee can
+      //    choose the Gmail account they use for this company.
+      const chosenAccount = await signInWithGoogleWorkspace();
+      if (!chosenAccount?.accessToken) {
+        // The picker was closed or cancelled: stay on the login screen.
+        Alert.alert(
+          'Login required',
+          'Please sign in with Google to continue and join this company.'
+        );
+        setInlineError('Sign in with Google to continue.');
+        setLoading(false);
+        return;
+      }
+      let googleToken = chosenAccount.accessToken;
+      let googleEmail =
+        chosenAccount.email ||
+        (await resolveGoogleEmail(chosenAccount.accessToken)) ||
+        '';
+      let googleScopes: string[] = chosenAccount.scopes || [];
 
       const readWorkers = (id: string, token: string | null) =>
         fetch(
@@ -190,15 +206,22 @@ export default function LoginScreen() {
       // Google account (the first one may not be the shared email).
       if (!response || !response.ok) {
         const fresh = await signInWithGoogleWorkspace();
-        if (fresh?.accessToken) {
-          googleToken = fresh.accessToken;
-          googleEmail =
-            fresh.email ||
-            (await resolveGoogleEmail(fresh.accessToken)) ||
-            googleEmail;
-          googleScopes = fresh.scopes || [];
-          response = await readWorkers(resolvedSheetId, googleToken);
+        if (!fresh?.accessToken) {
+          Alert.alert(
+            'Login required',
+            'Please sign in with Google to continue and join this company.'
+          );
+          setInlineError('Sign in with Google to continue.');
+          setLoading(false);
+          return;
         }
+        googleToken = fresh.accessToken;
+        googleEmail =
+          fresh.email ||
+          (await resolveGoogleEmail(fresh.accessToken)) ||
+          googleEmail;
+        googleScopes = fresh.scopes || [];
+        response = await readWorkers(resolvedSheetId, googleToken);
       }
 
       if (!response || !response.ok) {
@@ -226,23 +249,24 @@ export default function LoginScreen() {
         return;
       }
 
-      // 3. We need a Google identity to match against the shared email.
-      if (!googleEmail) {
-        googleEmail = (await resolveGoogleEmail(googleToken)) || '';
-      }
-      if (!googleEmail) {
-        setInlineError(
-          'Sign in with Google using the email your admin shared, then try again.'
-        );
-        setLoading(false);
-        return;
-      }
-
       const data = await response.json();
 
+      setPendingJoin({
+        sheetId: resolvedSheetId,
+        companyId: companyId || '',
+        workerId: link.workerId || '',
+      });
+
+      const showEmptyVerify = () => {
+        setFetchedWorkerCandidates([]);
+        setFetchedWorkerData(null);
+        setVerifiedGoogleEmail(googleEmail);
+        setWorkerVerifyVisible(true);
+      };
+
       if (!data.values || data.values.length === 0) {
-        setInlineError('Link not recognized. Please check with your admin.');
-        setLoading(false);
+        // No workers in the sheet: still let the user fill in their details.
+        showEmptyVerify();
         return;
       }
 
@@ -272,8 +296,9 @@ export default function LoginScreen() {
         : [];
 
       if (matches.length === 0) {
-        setInlineError('Link not recognized. Please check with your admin.');
-        setLoading(false);
+        // The link format is valid but the worker row is missing. Show the
+        // verify modal with empty inputs instead of stopping the flow.
+        showEmptyVerify();
         return;
       }
 
@@ -300,47 +325,23 @@ export default function LoginScreen() {
         return;
       }
 
-      // 4. The signed-in Google account must match the email the admin shared
-      //    for this worker. Only then do we let them into the tabs.
+      // Prefer the row for the Google account that was selected, but still use
+      // the matched worker row if another Gmail account was chosen.
       const normalizedGoogleEmail = googleEmail.trim().toLowerCase();
       const emailMatches = usableMatches.filter(
         (row) => valueOf(row, 'Email').toLowerCase() === normalizedGoogleEmail
       );
-
-      if (emailMatches.length === 0) {
-        const sharedEmails = Array.from(
-          new Set(
-            usableMatches
-              .map((row) => valueOf(row, 'Email').toLowerCase())
-              .filter(Boolean)
-          )
-        );
-        // Clear the sticky Google session so the next Join tap prompts the
-        // worker to choose the account the admin shared with.
-        await clearGoogleSession().catch(() => {});
-        console.warn(
-          '[JoinLink] Email mismatch. Signed in as',
-          normalizedGoogleEmail,
-          '| shared emails:',
-          sharedEmails
-        );
-        setInlineError(
-          `You signed in as ${normalizedGoogleEmail}, but this link belongs to ${
-            sharedEmails.join(' or ') || 'another email'
-          }. Tap Join again and choose that Google account.`
-        );
-        setLoading(false);
-        return;
-      }
+      const finalMatches =
+        emailMatches.length > 0 ? emailMatches : usableMatches;
 
       console.log(
         '[JoinLink] Access OK → google:',
         normalizedGoogleEmail,
         '| worker:',
-        valueOf(emailMatches[0], 'WorkerID')
+        valueOf(finalMatches[0], 'WorkerID')
       );
 
-      const candidates = emailMatches.map((row) => {
+      const candidates = finalMatches.map((row) => {
         const rowDesignation = valueOf(row, 'Designation').toLowerCase();
         return {
           workerId: valueOf(row, 'WorkerID'),
@@ -357,6 +358,7 @@ export default function LoginScreen() {
 
       setFetchedWorkerCandidates(candidates);
       setFetchedWorkerData(candidates[0]);
+      setVerifiedGoogleEmail(googleEmail);
       setWorkerVerifyVisible(true);
     } catch {
       setInlineError('Invalid or expired link');
@@ -367,11 +369,39 @@ export default function LoginScreen() {
   };
 
   const handleWorkerVerify = async (name: string, phone: string, email: string) => {
-    if (!fetchedWorkerData) return;
-
     const normalizeName = (value: string) =>
       value.trim().replace(/\s+/g, ' ').toLowerCase();
     const digitsOnly = (value: string) => (value || '').replace(/\D/g, '');
+
+    // No worker row was found for this link: let the employee join with the
+    // details they entered in the modal.
+    if (fetchedWorkerCandidates.length === 0 && !fetchedWorkerData) {
+      const fallbackWorkerId =
+        pendingJoin?.workerId ||
+        `WORKER-${Date.now().toString(36).slice(-6).toUpperCase()}`;
+      const fallback = {
+        workerId: fallbackWorkerId,
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        phone: digitsOnly(phone),
+        payPerHour: 0,
+        designation: 'worker' as const,
+        companyName: 'Company',
+        sheetId: pendingJoin?.sheetId || '',
+        companyId: pendingJoin?.companyId || '',
+      };
+      dispatch(setWorkerProfile(fallback));
+      void saveWorkerToTracking({
+        workerId: fallback.workerId,
+        name: fallback.name,
+        email: fallback.email,
+        phone: fallback.phone,
+        companyId: fallback.companyId,
+        sheetId: fallback.sheetId,
+      });
+      router.replace('/(tabs)/home');
+      return;
+    }
 
     const candidates =
       fetchedWorkerCandidates.length > 0
@@ -650,9 +680,20 @@ export default function LoginScreen() {
       }
     } else {
       setExistingAccountPopup(false);
-      if (result.error && result.error !== 'cancelled') {
+      const cancelled =
+        !result.error || result.error.toLowerCase().includes('cancel');
+      if (cancelled) {
+        // The account picker was dismissed: stay on the login screen.
+        Alert.alert(
+          'Login required',
+          'Please sign in with Google to continue.'
+        );
+      } else {
         console.error('[AuthDebug 0] Google Sign-In failed:', result.error);
-        Alert.alert('Google Sign-In Failed', result.error + '\n\nCheck console for details.');
+        Alert.alert(
+          'Google Sign-In Failed',
+          result.error + '\n\nCheck console for details.'
+        );
       }
     }
     setLoading(false);
@@ -751,9 +792,11 @@ export default function LoginScreen() {
         onClose={() => {
           setWorkerVerifyVisible(false);
           setFetchedWorkerData(null);
+          setVerifiedGoogleEmail('');
         }}
         onVerify={handleWorkerVerify}
         workerData={fetchedWorkerData}
+        googleEmail={verifiedGoogleEmail}
       />
 
       {/* "Already have an account" popup — shown right after an existing

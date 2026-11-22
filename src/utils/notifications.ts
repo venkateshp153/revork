@@ -33,6 +33,8 @@ export interface AlertInput {
   durationHours: number;
   notes?: string;
   fromUid: string;
+  /** Notification category shown as the alert icon. Defaults to announcement. */
+  type?: string;
 }
 
 export async function sendAlert(input: AlertInput): Promise<void> {
@@ -48,8 +50,10 @@ export async function sendAlert(input: AlertInput): Promise<void> {
     input.sheetId,
     'Notifications',
     [
-      `ALERT_${Date.now()}_${input.target}`,
-      'announcement',
+      `ALERT_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${
+        input.target
+      }`,
+      input.type || 'announcement',
       input.target,
       input.fromUid,
       input.title.trim(),

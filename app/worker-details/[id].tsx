@@ -94,11 +94,13 @@ export default function WorkerDetailsScreen() {
   const isEmployeeRole = !isAdmin && !isManager;
   const theme = getRoleTheme(designation, isEmployeeRole);
   const targetHasAccess = rowHasEditAccess(workerRow);
-  const hasEditAccess = rowHasEditAccess(myRow);
-  const hasReadAccess = rowHasReadAccess(myRow);
-  const canEdit = isAdmin || hasEditAccess;
-  const canReadAll = isAdmin || isManager || hasReadAccess || hasEditAccess;
+  const canEdit = isAdmin || isManager;
   const dataReady = workerRows.length > 0;
+
+  // Only admins and managers may edit employee data.
+  useEffect(() => {
+    if (!isAdmin && !isManager && isEditing) setIsEditing(false);
+  }, [isAdmin, isManager, isEditing]);
 
   useEffect(() => {
     // Wait for Workers to load: a link-joined manager starts with
@@ -106,18 +108,19 @@ export default function WorkerDetailsScreen() {
     if (!dataReady) return;
     if (
       isEmployeeRole &&
-      !canReadAll &&
       workerId !== currentWorkerId &&
       workerId !== 'me'
     ) {
-      Alert.alert('Access Denied', 'Ask the admin to grant read access.');
+      Alert.alert(
+        'Access denied',
+        'Employees can only view their own profile.'
+      );
       router.back();
     }
   }, [
     workerId,
     currentWorkerId,
     isEmployeeRole,
-    canReadAll,
     dataReady,
     router,
   ]);

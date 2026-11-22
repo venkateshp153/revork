@@ -40,6 +40,19 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ];
 
+function dedupeRows(
+  rows: SheetRow[],
+  keyFor: (row: SheetRow) => string
+): SheetRow[] {
+  const seen = new Set<string>();
+  return rows.filter((row) => {
+    const key = keyFor(row);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export default function AlertsScreen() {
   const user = useSelector((state: RootState) => state.user);
 
@@ -113,13 +126,28 @@ export default function AlertsScreen() {
           : notificationRows
       ).filter(isAlertActive);
 
+      const sortedAlerts = visibleAlerts
+        .slice()
+        .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''));
       setAlerts(
-        visibleAlerts
-          .slice()
-          .sort((a, b) => (b.Timestamp || '').localeCompare(a.Timestamp || ''))
+        dedupeRows(
+          sortedAlerts,
+          (row) => row.NotifID || `row_${row._row}`
+        )
       );
-      setLeaveRequests(leaveRows);
-      setWorkers(workerRows);
+      setLeaveRequests(
+        dedupeRows(
+          leaveRows,
+          (row) => row.RequestID || `row_${row._row}`
+        )
+      );
+      setWorkers(
+        dedupeRows(
+          workerRows,
+          (row) =>
+            row.WorkerID || row.Email || `row_${row._row}`
+        )
+      );
     } catch (error) {
       console.error('Error fetching alerts:', error);
     } finally {
@@ -367,6 +395,12 @@ export default function AlertsScreen() {
       case 'leave_request':
       case 'leave_update':
         return 'calendar-check';
+      case 'delivery_audit':
+        return 'truck-delivery-outline';
+      case 'proof_request':
+        return 'camera-marker-outline';
+      case 'delivery_assignment':
+        return 'map-marker-check-outline';
       case 'birthday':
         return 'cake-variant';
       default:
@@ -381,6 +415,12 @@ export default function AlertsScreen() {
       case 'leave_request':
       case 'leave_update':
         return '#8B5CF6';
+      case 'delivery_audit':
+        return '#0EA5E9';
+      case 'proof_request':
+        return '#D97706';
+      case 'delivery_assignment':
+        return '#0F766E';
       case 'birthday':
         return '#DB2777';
       default:
@@ -529,7 +569,9 @@ export default function AlertsScreen() {
       <FlatList
         data={alerts}
         renderItem={renderAlert}
-        keyExtractor={(item) => item.NotifID || `${item._row}`}
+        keyExtractor={(item, index) =>
+          `${item.NotifID || 'alert'}-${item._row || index}`
+        }
         contentContainerStyle={styles.listContainer}
         showsVerticalScrollIndicator={false}
         refreshControl={

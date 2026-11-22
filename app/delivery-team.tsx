@@ -89,7 +89,21 @@ export default function DeliveryTeamScreen() {
     if (canTrackTeam) {
       return distribution.plans;
     }
-    return myPlan ? [myPlan] : [];
+    if (!myPlan) return [];
+    const assignedPending = myPlan.pending.filter(
+      (location) => location.assignmentMode !== 'auto'
+    );
+    return [
+      {
+        ...myPlan,
+        pending: assignedPending,
+        current: assignedPending[0] || null,
+        ordersPending: assignedPending.reduce(
+          (sum, location) => sum + (location.orderCount || 0),
+          0
+        ),
+      },
+    ];
   }, [canTrackTeam, distribution.plans, myPlan]);
 
   const load = useCallback(
@@ -232,8 +246,9 @@ export default function DeliveryTeamScreen() {
               />
               <Text style={styles.warningText}>
                 {distribution.unassigned.length} address
-                {distribution.unassigned.length === 1 ? '' : 'es'} are waiting
-                for an employee spot. Set spots in Delivery spots.
+                {distribution.unassigned.length === 1 ? '' : 'es'} are not
+                assigned to an employee. Set spots or assign them from Delivery
+                control.
               </Text>
             </View>
           )}

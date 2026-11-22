@@ -96,8 +96,6 @@ export default function WorkersScreen() {
       ),
     [workers, currentWorkerId, user.email, user.workerProfile?.email]
   );
-  const myEditAccess = rowHasEditAccess(myRow);
-  const myReadAccess = rowHasReadAccess(myRow);
 
   const designation = effectiveDesignation(
     user.profile?.designation || user.designation,
@@ -107,8 +105,6 @@ export default function WorkersScreen() {
   const isManager = designation === 'manager';
   const isEmployee = !isAdmin && !isManager;
   const theme = getRoleTheme(designation, isEmployee);
-  const canViewDetails =
-    isAdmin || isManager || myReadAccess || myEditAccess;
 
   const fetchData = useCallback(async () => {
     if (!sheetId) {
@@ -632,13 +628,8 @@ export default function WorkersScreen() {
   const renderContactCard = ({ item }: { item: SheetRow }) => (
     <TouchableOpacity
       style={styles.contactCard}
-      activeOpacity={0.85}
-      disabled={!canViewDetails}
-      onPress={() =>
-        router.push(
-          `/worker-details/${item.WorkerID}${myEditAccess ? '?editMode=true' : ''}`
-        )
-      }
+      activeOpacity={1}
+      disabled
     >
       {item.PhotoURL ? (
         <Image source={{ uri: item.PhotoURL }} style={styles.contactAvatar} />
@@ -660,21 +651,6 @@ export default function WorkersScreen() {
         </Text>
         <Text style={styles.contactDetail}>{item.Phone || 'No phone'}</Text>
       </View>
-      {myEditAccess ? (
-        <MaterialCommunityIcons
-          name="pencil"
-          size={16}
-          color={theme.accent}
-          style={styles.contactEditIcon}
-        />
-      ) : myReadAccess ? (
-        <MaterialCommunityIcons
-          name="eye-outline"
-          size={16}
-          color={theme.accent}
-          style={styles.contactEditIcon}
-        />
-      ) : null}
     </TouchableOpacity>
   );
 

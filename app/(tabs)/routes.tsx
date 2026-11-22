@@ -27,6 +27,7 @@ import LocationPicker from '@/components/LocationPicker';
 import RouteMap from '@/components/RouteMap';
 import DeliveryProofBox from '@/components/DeliveryProofBox';
 import DeliveryProofModal from '@/components/DeliveryProofModal';
+import DeliveryControlPanel from '@/components/DeliveryControlPanel';
 import PhotoViewerModal, {
   type ViewerPhoto,
 } from '@/components/PhotoViewerModal';
@@ -58,6 +59,7 @@ import {
 } from '@/src/utils/settings';
 import {
   describeGoogleMapsError,
+  formatDistance,
   formatDuration,
   geocodeAddress,
   getCurrentLocation,
@@ -77,53 +79,39 @@ import {
 } from '@/src/utils/routePlanner';
 import {
   createRoute,
-  defaultRouteName,
+  dedupeRouteStops,
   loadRouteState,
-  makeRouteId,
-  routeDeliveredCount,
-  routeProgress,
+  normalizeAddressKey,
   routeShareText,
   saveRouteState,
-  type RouteAssignee,
+  sortPriorityStops,
   type SavedRoute,
-  type RouteStatus,
 } from '@/src/utils/routeStore';
 import {
+  addDeliveryLocations,
   buildDistribution,
+  estimateDeliveryMinutes,
   findPlanForWorker,
   formatDeliveryEta,
   loadDeliveryLocations,
+  removeDuplicateDeliveryLocations,
   setLocationDelivered,
   workerSpotsFromRows,
   type DeliveryLocationRecord,
 } from '@/src/utils/deliverySpots';
+import { flushPendingMutations } from '@/src/services/sync';
 
 function stopId(): string {
   return `stop_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function initials(name = ''): string {
-  return name
-    .split(' ')
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part.charAt(0).toUpperCase())
-    .join('');
-}
-
-function formatShortDate(timestamp?: number): string {
-  if (!timestamp) return '—';
-  const date = new Date(timestamp);
-  const now = new Date();
-  if (date.toDateString() === now.toDateString()) {
-    return date.toLocaleTimeString(undefined, {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }
-  return date.toLocaleDateString(undefined, {
+/** The daily route is named after today's date. */
+function todayRouteName(): string {
+  return new Date().toLocaleDateString(undefined, {
+    weekday: 'short',
     month: 'short',
     day: 'numeric',
+    year: 'numeric',
   });
 }
 
@@ -137,29 +125,17 @@ function formatDeliveryTime(iso?: string): string {
   });
 }
 
-const STATUS_META: Record<
-  RouteStatus,
-  { label: string; color: string; background: string; icon: string }
-> = {
-  draft: {
-    label: 'Draft',
-    color: '#475569',
-    background: '#F1F5F9',
-    icon: 'pencil-outline',
-  },
-  active: {
-    label: 'On route',
-    color: '#1D4ED8',
-    background: '#E8F0FE',
-    icon: 'navigation-variant',
-  },
-  completed: {
-    label: 'Completed',
-    color: '#15803D',
-    background: '#DCFCE7',
-    icon: 'check-decagram',
-  },
-};
+/** Live elapsed time shown on the running-route status bar. */
+function formatElapsedTime(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  const pad = (value: number) => `${value}`.padStart(2, '0');
+  return hours > 0
+    ? `${hours}:${pad(minutes)}:${pad(seconds)}`
+    : `${pad(minutes)}:${pad(seconds)}`;
+}
 
 type StopFilter = 'all' | 'pending' | 'delivered';
 
@@ -214,6 +190,53 @@ export default function RouteScreen() {
     ]
   );
 
+  // Every pending location assigned to this employee (auto, optimized or
+  // manual). Locations belonging to other employees are never included.
+  const myAssignedPending = useMemo(
+    () => (myPlan ? myPlan.pending : []),
+    [myPlan]
+  );
+  const myLocationIds = useMemo(() => {
+    const ids = new Set<string>();
+    const addresses = new Set<string>();
+    const add = (location: DeliveryLocationRecord) => {
+      if (location.id) ids.add(location.id);
+      const key = normalizeAddressKey(location.address);
+      if (key) addresses.add(key);
+    };
+    myPlan?.pending.forEach(add);
+    myPlan?.delivered.forEach(add);
+    return { ids, addresses };
+  }, [myPlan]);
+  const myLocationIdByAddress = useMemo(() => {
+    const map = new Map<string, string>();
+    const add = (location: DeliveryLocationRecord) => {
+      const key = normalizeAddressKey(location.address);
+      if (key && location.id) map.set(key, location.id);
+    };
+    myPlan?.pending.forEach(add);
+    myPlan?.delivered.forEach(add);
+    return map;
+  }, [myPlan]);
+  const priorityLocations = useMemo(() => {
+    const ids = new Set<string>();
+    const addresses = new Set<string>();
+    myPlan?.pending.forEach((location) => {
+      if (!location.priority) return;
+      if (location.id) ids.add(location.id);
+      const key = normalizeAddressKey(location.address);
+      if (key) addresses.add(key);
+    });
+    return { ids, addresses };
+  }, [myPlan]);
+  const myAssignedEstimate = useMemo(
+    () =>
+      myPlan?.worker.spot
+        ? estimateDeliveryMinutes(myPlan.worker.spot, myAssignedPending)
+        : null,
+    [myPlan, myAssignedPending]
+  );
+
   // Address search.
   const [query, setQuery] = useState('');
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
@@ -225,15 +248,13 @@ export default function RouteScreen() {
   const [stopQuery, setStopQuery] = useState('');
   const [stopFilter, setStopFilter] = useState<StopFilter>('all');
 
-  // Modals & transient state.
-  const [routesModalVisible, setRoutesModalVisible] = useState(false);
-  const [nameModalVisible, setNameModalVisible] = useState(false);
-  const [nameMode, setNameMode] = useState<'create' | 'rename'>('create');
-  const [nameDraft, setNameDraft] = useState('');
-  const [renameId, setRenameId] = useState<string | null>(null);
-
-  const [assignModalVisible, setAssignModalVisible] = useState(false);
-  const [workerQuery, setWorkerQuery] = useState('');
+  // Start-route setup: where the employee begins and finishes the day.
+  const [startSetupVisible, setStartSetupVisible] = useState(false);
+  const [startSetupStart, setStartSetupStart] =
+    useState<RouteLocation | null>(null);
+  const [startSetupEnd, setStartSetupEnd] =
+    useState<RouteLocation | null>(null);
+  const [startSetupBusy, setStartSetupBusy] = useState(false);
 
   const [manualModalVisible, setManualModalVisible] = useState(false);
   const [manualText, setManualText] = useState('');
@@ -257,7 +278,6 @@ export default function RouteScreen() {
   const [detailPhotoBusy, setDetailPhotoBusy] = useState(false);
   const [detailPhotoSyncing, setDetailPhotoSyncing] = useState(false);
   const [pendingProofUploads, setPendingProofUploads] = useState(0);
-  const [proofRecords, setProofRecords] = useState<DeliveryPhotoRecord[]>([]);
   const [viewerPhoto, setViewerPhoto] = useState<DeliveryPhotoRecord | null>(
     null
   );
@@ -284,18 +304,82 @@ export default function RouteScreen() {
     () => routes.find((route) => route.id === activeId) || null,
     [routes, activeId]
   );
-  const stops = useMemo(() => activeRoute?.stops || [], [activeRoute]);
-  const deliveredCount = activeRoute ? routeDeliveredCount(activeRoute) : 0;
-  const progress = activeRoute ? routeProgress(activeRoute) : 0;
+
+  // Live clock for the running-route timer.
+  const [clockTick, setClockTick] = useState(Date.now());
+  useEffect(() => {
+    if (activeRoute?.status !== 'active') return;
+    setClockTick(Date.now());
+    const id = setInterval(() => setClockTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [activeRoute?.status, activeRoute?.id]);
+
+  const routeStartedAt =
+    activeRoute?.startedAt || activeRoute?.createdAt || clockTick;
+  const routeEndedAt =
+    activeRoute?.status === 'completed'
+      ? activeRoute.completedAt || clockTick
+      : clockTick;
+  const routeElapsedText = formatElapsedTime(
+    (routeEndedAt -
+      routeStartedAt -
+      (activeRoute?.totalPausedMs || 0)) /
+      1000
+  );
+
+  const stops = useMemo(() => {
+    const unique = dedupeRouteStops(activeRoute?.stops || []);
+    // When the employee's plan is unavailable (for example offline before the
+    // Workers sheet loads) keep the saved stops instead of showing nothing.
+    if (!myPlan) return sortPriorityStops(unique);
+    // Only stops tied to one of this employee's assigned deliveries are shown.
+    // Matching on address also covers stops saved before a duplicate row was
+    // removed from the shared list. A manually added stop has no locationId
+    // and still belongs to them.
+    return sortPriorityStops(
+      unique
+        .filter((stop) => {
+          if (!stop.locationId) return true;
+          if (myLocationIds.ids.has(stop.locationId)) return true;
+          const key = normalizeAddressKey(stop.address);
+          return !!key && myLocationIds.addresses.has(key);
+        })
+        .map((stop) => {
+          const key = normalizeAddressKey(stop.address);
+          const assignedId =
+            stop.locationId && key
+              ? myLocationIdByAddress.get(key)
+              : undefined;
+          const locationId = assignedId || stop.locationId;
+          const priority =
+            !!stop.priority ||
+            (!!locationId && priorityLocations.ids.has(locationId)) ||
+            (!!key && priorityLocations.addresses.has(key));
+          if (locationId === stop.locationId && priority === stop.priority) {
+            return stop;
+          }
+          return {
+            ...stop,
+            ...(locationId ? { locationId } : {}),
+            ...(priority ? { priority: true } : {}),
+          };
+        })
+    );
+  }, [
+    activeRoute,
+    myPlan,
+    myLocationIds,
+    myLocationIdByAddress,
+    priorityLocations,
+  ]);
+  const deliveredCount = stops.filter((stop) => stop.delivered).length;
+  const progress =
+    stops.length > 0
+      ? Math.round((deliveredCount / stops.length) * 100)
+      : 0;
   const nextStopIndex = stops.findIndex((stop) => !stop.delivered);
   const nextStop = nextStopIndex >= 0 ? stops[nextStopIndex] : null;
-  const statusMeta = STATUS_META[activeRoute?.status || 'draft'];
   const allDelivered = stops.length > 0 && deliveredCount === stops.length;
-
-  const sortedRoutes = useMemo(
-    () => [...routes].sort((a, b) => b.updatedAt - a.updatedAt),
-    [routes]
-  );
 
   const filteredStops = useMemo(() => {
     const text = stopQuery.trim().toLowerCase();
@@ -323,31 +407,39 @@ export default function RouteScreen() {
     const onRoute = new Set(
       stops.map((stop) => stop.locationId).filter(Boolean) as string[]
     );
-    return myPlan ? myPlan.pending.filter((location) => !onRoute.has(location.id)) : [];
-  }, [myPlan, stops]);
-  const routeProofStats = useMemo(() => {
-    const stopIds = new Set(stops.map((stop) => stop.id));
-    const photos = proofRecords.filter((record) =>
-      stopIds.has(record.stopId)
+    return myAssignedPending.filter((location) => !onRoute.has(location.id));
+  }, [myAssignedPending, stops]);
+
+  const myDeliveredToday = useMemo(() => {
+    if (!myPlan) return [];
+    const today = localDateStamp();
+    return myPlan.delivered.filter((location) => {
+      if (!location.deliveredAt) return false;
+      const delivered = new Date(location.deliveredAt);
+      return (
+        !Number.isNaN(delivered.getTime()) &&
+        localDateStamp(delivered) === today
+      );
+    });
+  }, [myPlan]);
+
+  const myAssignedOrdersPending = myAssignedPending.reduce(
+    (sum, location) => sum + (location.orderCount || 0),
+    0
+  );
+  const myOrdersToday =
+    myAssignedOrdersPending +
+    myDeliveredToday.reduce(
+      (sum, location) => sum + (location.orderCount || 0),
+      0
     );
-    const stopsWithProof = new Set(photos.map((record) => record.stopId));
-    const deliveredStops = stops.filter((stop) => stop.delivered);
-    return {
-      photos,
-      uploaded: photos.filter((record) => record.status === 'uploaded').length,
-      pending: photos.filter(
-        (record) => record.status !== 'uploaded' && !record.holdUpload
-      ).length,
-      deliveredWithProof: deliveredStops.filter((stop) =>
-        stopsWithProof.has(stop.id)
-      ).length,
-      deliveredStops: deliveredStops.length,
-      ordersDelivered: deliveredStops.reduce(
-        (sum, stop) => sum + (stop.orderCount || 0),
-        0
-      ),
-    };
-  }, [stops, proofRecords]);
+  const myLocationsToday =
+    myAssignedPending.length + myDeliveredToday.length;
+  const myAssignedDistance = myAssignedEstimate?.distanceMeters || 0;
+  const myDriveMinutes =
+    myAssignedDistance > 0
+      ? Math.max(1, Math.round(myAssignedDistance / 8.33 / 60))
+      : 0;
 
   const viewerData = useMemo<ViewerPhoto | null>(() => {
     if (!viewerPhoto) return null;
@@ -382,18 +474,15 @@ export default function RouteScreen() {
     ? stops.findIndex((stop) => stop.id === menuStop.id)
     : -1;
 
-  const filteredWorkers = useMemo(() => {
-    const text = workerQuery.trim().toLowerCase();
-    return workers.filter((worker) => {
-      if ((worker.Designation || '').toLowerCase() === 'admin') return false;
-      if (!text) return true;
-      return `${worker.Name || ''} ${worker.Designation || ''}`
-        .toLowerCase()
-        .includes(text);
-    });
-  }, [workers, workerQuery]);
-
   const mapPath = useMemo(() => {
+    // If any pending stop is high priority, draw the path in the actual
+    // prioritized order instead of the older optimizer order.
+    const hasPriority = stops.some(
+      (stop) => stop.priority && !stop.delivered
+    );
+    if (hasPriority && activeRoute?.start) {
+      return straightPath(activeRoute.start, stops, activeRoute.end);
+    }
     if (activeRoute?.optimized && activeRoute.path.length > 1) {
       return activeRoute.path;
     }
@@ -421,13 +510,20 @@ export default function RouteScreen() {
     (async () => {
       const state = await loadRouteState();
       if (!alive) return;
+      const name = todayRouteName();
       if (state.routes.length === 0) {
-        const route = createRoute(defaultRouteName());
+        const route = createRoute(name);
         setRoutes([route]);
         setActiveId(route.id);
       } else {
-        setRoutes(state.routes);
-        setActiveId(state.activeId || state.routes[0].id);
+        const nextActiveId = state.activeId || state.routes[0].id;
+        // The daily route always carries today's date as its name.
+        setRoutes(
+          state.routes.map((route) =>
+            route.id === nextActiveId ? { ...route, name } : route
+          )
+        );
+        setActiveId(nextActiveId);
       }
       setHydrated(true);
     })();
@@ -447,7 +543,7 @@ export default function RouteScreen() {
   useEffect(() => {
     if (!hydrated) return;
     if (routes.length === 0) {
-      const route = createRoute(defaultRouteName());
+      const route = createRoute(todayRouteName());
       setRoutes([route]);
       setActiveId(route.id);
       return;
@@ -457,26 +553,39 @@ export default function RouteScreen() {
     }
   }, [hydrated, routes, activeId]);
 
+  const reloadDeliveryData = useCallback(async () => {
+    if (!sheetId) return;
+    const [rows, locations] = await Promise.all([
+      fetchSheetRows(sheetId, 'Workers').catch(() => [] as SheetRow[]),
+      loadDeliveryLocations(sheetId),
+    ]);
+    setWorkers(rows);
+    setDeliveryLocations(locations);
+  }, [sheetId]);
+
   // Load workers and the shared delivery list once per focus so spots,
   // assignments and the "Assign to" list stay current.
   useFocusEffect(
     useCallback(() => {
-      let alive = true;
-      (async () => {
-        if (!sheetId) return;
-        const [rows, locations] = await Promise.all([
-          fetchSheetRows(sheetId, 'Workers').catch(() => [] as SheetRow[]),
-          loadDeliveryLocations(sheetId),
-        ]);
-        if (!alive) return;
-        setWorkers(rows);
-        setDeliveryLocations(locations);
-      })();
-      return () => {
-        alive = false;
-      };
-    }, [sheetId])
+      void reloadDeliveryData();
+    }, [reloadDeliveryData])
   );
+
+  // Admins/managers clean any duplicate rows left in the shared
+  // DeliveryLocations tab, then refresh the deduped list.
+  useEffect(() => {
+    if (!sheetId || !canAssign) return;
+    let alive = true;
+    (async () => {
+      const removed = await removeDuplicateDeliveryLocations(sheetId);
+      if (alive && removed > 0) {
+        await reloadDeliveryData();
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sheetId, canAssign, reloadDeliveryData]);
 
   useFocusEffect(
     useCallback(() => {
@@ -514,7 +623,6 @@ export default function RouteScreen() {
     const refresh = async () => {
       const records = await loadDeliveryPhotos();
       if (!alive) return;
-      setProofRecords(records);
       setPendingProofUploads(
         records.filter(
           (record) => record.status !== 'uploaded' && !record.holdUpload
@@ -550,7 +658,11 @@ export default function RouteScreen() {
       setRoutes((prev) =>
         prev.map((route) =>
           route.id === activeId
-            ? { ...route, stops: updater(route.stops), updatedAt: Date.now() }
+            ? {
+                ...route,
+                stops: dedupeRouteStops(updater(route.stops)),
+                updatedAt: Date.now(),
+              }
             : route
         )
       );
@@ -620,9 +732,17 @@ export default function RouteScreen() {
     setPendingStopLocation(null);
   };
 
-  const savePendingStop = () => {
+  const savePendingStop = async () => {
     if (!pendingStopLocation) return;
-    addStopLocation(pendingStopLocation, {
+    if (
+      !pendingStopName.trim() ||
+      !pendingStopPhone.trim() ||
+      !pendingStopNote.trim()
+    ) {
+      return;
+    }
+    const location = pendingStopLocation;
+    const stop = addStopLocation(location, {
       note: pendingStopNote,
       contactName: pendingStopName,
       phone: pendingStopPhone,
@@ -631,23 +751,86 @@ export default function RouteScreen() {
     setPendingStopLocation(null);
     setQuery('');
     setSuggestions([]);
+
+    // Also save the stop to the shared DeliveryLocations sheet so admins and
+    // managers see it right away, then link it to the local route stop.
+    if (!sheetId) return;
+    try {
+      const key = normalizeAddressKey(location.address);
+      let locationId = deliveryLocations.find(
+        (item) =>
+          item.status !== 'delivered' &&
+          normalizeAddressKey(item.address) === key
+      )?.id;
+
+      if (!locationId) {
+        const actor = {
+          workerId:
+            user.workerProfile?.workerId || myRow?.WorkerID || '',
+          name: user.name || myRow?.Name || 'Employee',
+          isManager,
+        };
+        const onlyMySpot = myPlan?.worker ? [myPlan.worker] : [];
+        const added = await addDeliveryLocations(
+          sheetId,
+          [
+            {
+              address: location.address,
+              lat: location.lat,
+              lng: location.lng,
+              contactName: pendingStopName.trim(),
+              phone: pendingStopPhone.trim(),
+              orderCount: 1,
+              note: pendingStopNote.trim(),
+            },
+          ],
+          actor.name,
+          actor,
+          onlyMySpot
+        );
+        if (added > 0) {
+          await flushPendingMutations(true);
+          const locations = await loadDeliveryLocations(sheetId);
+          locationId = locations.find(
+            (item) =>
+              item.status !== 'delivered' &&
+              normalizeAddressKey(item.address) === key
+          )?.id;
+        }
+      }
+
+      if (locationId) {
+        patchStops((prev) =>
+          prev.map((item) =>
+            item.id === stop.id ? { ...item, locationId } : item
+          )
+        );
+      }
+      await reloadDeliveryData();
+    } catch (error: any) {
+      Alert.alert(
+        'Saved on this device',
+        error?.message ||
+          'The stop is on your route but the shared delivery list could not be updated yet.'
+      );
+    }
   };
+
+  const canSavePendingStop =
+    !!pendingStopLocation &&
+    !!pendingStopName.trim() &&
+    !!pendingStopPhone.trim() &&
+    !!pendingStopNote.trim();
 
   /**
    * Pulls this employee's pending spot deliveries into the route. The linked
    * DeliveryLocations id lets a completed stop update the shared list so admins
    * and managers see live progress.
    */
-  const addMyDeliveriesToRoute = () => {
-    if (!myPlan) return;
-    if (myPendingForRoute.length === 0) {
-      Alert.alert(
-        'Nothing new',
-        'All of your pending deliveries are already on this route.'
-      );
-      return;
-    }
-    const newStops: RouteStop[] = myPendingForRoute.map((location) => ({
+  const makeStopsFromPlan = (
+    locations: DeliveryLocationRecord[]
+  ): RouteStop[] =>
+    locations.map((location) => ({
       id: stopId(),
       address: location.address,
       lat: location.lat,
@@ -658,7 +841,19 @@ export default function RouteScreen() {
       ...(location.contactName ? { contactName: location.contactName } : {}),
       ...(location.phone ? { phone: location.phone } : {}),
       ...(location.orderCount ? { orderCount: location.orderCount } : {}),
+      ...(location.priority ? { priority: true } : {}),
     }));
+
+  const addMyDeliveriesToRoute = () => {
+    if (!myPlan) return;
+    if (myPendingForRoute.length === 0) {
+      Alert.alert(
+        'Nothing new',
+        'All of your pending deliveries are already on this route.'
+      );
+      return;
+    }
+    const newStops = makeStopsFromPlan(myPendingForRoute);
     patchStops((prev) => [...prev, ...newStops]);
     if (myPlan.worker.spot && activeRoute && !activeRoute.start) {
       updateActive({
@@ -732,121 +927,26 @@ export default function RouteScreen() {
     };
   }, [query]);
 
-  // ---------------------------------------------------------------- routes
-  const openCreateRoute = () => {
-    setNameMode('create');
-    setNameDraft(`Route · ${new Date().toLocaleDateString(undefined, {
-      month: 'short',
-      day: 'numeric',
-    })}`);
-    setRenameId(null);
-    setNameModalVisible(true);
-  };
-
-  const openRenameRoute = (route: SavedRoute) => {
-    setNameMode('rename');
-    setNameDraft(route.name);
-    setRenameId(route.id);
-    setNameModalVisible(true);
-  };
-
-  const submitName = () => {
-    const name = nameDraft.trim();
-    if (!name) {
-      Alert.alert('Name required', 'Give this route a short name.');
-      return;
-    }
-    if (nameMode === 'create') {
-      const route = createRoute(name);
-      setRoutes((prev) => [route, ...prev]);
-      setActiveId(route.id);
-      setRoutesModalVisible(false);
-    } else if (renameId) {
-      setRoutes((prev) =>
-        prev.map((route) =>
-          route.id === renameId
-            ? { ...route, name, updatedAt: Date.now() }
-            : route
-        )
-      );
-    }
-    setNameModalVisible(false);
-  };
-
-  const selectRoute = (id: string) => {
-    setActiveId(id);
-    setRoutesModalVisible(false);
-  };
-
-  const deleteRoute = (route: SavedRoute) => {
-    Alert.alert('Delete route?', `“${route.name}” will be removed.`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => {
-          // Keep the state updater pure; the hydration effect selects a new
-          // active route when the current one disappears.
-          setRoutes((prev) => prev.filter((item) => item.id !== route.id));
-        },
-      },
-    ]);
-  };
-
-  const duplicateRoute = (route: SavedRoute) => {
-    const now = Date.now();
-    const copy: SavedRoute = {
-      ...route,
-      id: makeRouteId(),
-      name: `${route.name} (copy)`,
-      stops: route.stops.map((stop) => ({
-        ...stop,
-        id: stopId(),
-        delivered: false,
-        deliveredAt: undefined,
-        deliveryId: undefined,
-        locationId: undefined,
-      })),
-      status: 'draft',
-      createdAt: now,
-      updatedAt: now,
-      startedAt: undefined,
-      completedAt: undefined,
-    };
-    setRoutes((prev) => [copy, ...prev]);
-    setActiveId(copy.id);
-    setRoutesModalVisible(false);
-  };
-
-  const startRoute = async () => {
+  // ---------------------------------------------------------------- route actions
+  const startRoute = () => {
     if (!activeRoute) return;
-    if (stops.length === 0) {
-      Alert.alert('No stops', 'Add at least one stop before starting.');
+    if (stops.length === 0 && myPendingForRoute.length === 0) {
+      Alert.alert(
+        'No deliveries',
+        'No assigned deliveries were found and this route has no stops yet.'
+      );
       return;
     }
-
-    let start = activeRoute.start;
-    if (!start) {
-      try {
-        const granted = await requestLocationAccess();
-        if (granted) {
-          start = await getCurrentLocation();
-          setCurrentLocation(start);
-          updateActive({ start, end: activeRoute.end || start });
-        }
-      } catch {
-        // A start location is helpful but not required to run the route.
-      }
-    }
-    updateActive({
-      status: 'active',
-      startedAt: activeRoute.startedAt || Date.now(),
-      completedAt: undefined,
-    });
+    const defaultStart =
+      activeRoute.start || myPlan?.worker.spot || currentLocation || null;
+    const defaultEnd = activeRoute.end || defaultStart;
+    setStartSetupStart(defaultStart);
+    setStartSetupEnd(defaultEnd);
+    setStartSetupVisible(true);
   };
 
   const pauseRoute = () => {
-    updateActive({ status: 'draft' });
+    updateActive({ status: 'draft', pausedAt: Date.now() });
   };
 
   const finishRoute = (deliveredOverride?: number) => {
@@ -854,11 +954,23 @@ export default function RouteScreen() {
     const delivered =
       typeof deliveredOverride === 'number'
         ? deliveredOverride
-        : routeDeliveredCount(activeRoute);
+        : stops.filter((stop) => stop.delivered).length;
+    // Hard guard: a route can only be finished once every stop is delivered.
+    const allMarked = stops.length > 0 && delivered >= stops.length;
+    if (!allMarked) {
+      Alert.alert(
+        'Deliveries pending',
+        `Mark every delivery as delivered first. ${Math.max(
+          0,
+          stops.length - delivered
+        )} stop${stops.length - delivered === 1 ? '' : 's'} still pending.`
+      );
+      return;
+    }
     updateActive({ status: 'completed', completedAt: Date.now() });
     Alert.alert(
       'Route completed',
-      `${delivered} of ${activeRoute.stops.length} stops delivered. Great work!`
+      `${delivered} of ${stops.length} stops delivered. Great work!`
     );
   };
 
@@ -866,12 +978,8 @@ export default function RouteScreen() {
     if (!activeRoute) return;
     if (!allDelivered) {
       Alert.alert(
-        'Finish route?',
-        `${pendingCount} stop${pendingCount === 1 ? '' : 's'} still pending. You can reopen the route later.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Finish', onPress: () => finishRoute() },
-        ]
+        'Cannot finish yet',
+        `${pendingCount} stop${pendingCount === 1 ? '' : 's'} still pending. Mark every delivery as delivered before finishing the route.`
       );
       return;
     }
@@ -1058,6 +1166,14 @@ export default function RouteScreen() {
     invalidateRoute();
   };
 
+  const setStopPriority = (stop: RouteStop, priority: boolean) => {
+    patchStops((prev) =>
+      prev.map((item) =>
+        item.id === stop.id ? { ...item, priority } : item
+      )
+    );
+  };
+
   const setStopFirst = (stop: RouteStop) => {
     patchStops((prev) => {
       const picked = prev.find((item) => item.id === stop.id);
@@ -1182,6 +1298,50 @@ export default function RouteScreen() {
 
   const openProofForStop = (stop: RouteStop) => {
     setDetailStopId(null);
+    // Pull the latest customer name/phone from the shared delivery location so
+    // the Mark delivery modal is pre-filled even for older saved stops.
+    const key = normalizeAddressKey(stop.address);
+    const location =
+      deliveryLocations.find((item) => item.id === stop.locationId) ||
+      deliveryLocations.find(
+        (item) =>
+          normalizeAddressKey(item.address) === key &&
+          item.status !== 'delivered'
+      ) ||
+      deliveryLocations.find(
+        (item) => normalizeAddressKey(item.address) === key
+      );
+    if (location) {
+      const contactName = location.contactName || stop.contactName;
+      const phone = location.phone || stop.phone;
+      const hasChanges =
+        contactName !== stop.contactName ||
+        phone !== stop.phone ||
+        (!!location.note && location.note !== stop.note) ||
+        (!!location.orderCount && location.orderCount !== stop.orderCount) ||
+        (!stop.locationId && !!location.id);
+      if (hasChanges) {
+        patchStops((prev) =>
+          prev.map((item) =>
+            item.id === stop.id
+              ? {
+                  ...item,
+                  ...(contactName ? { contactName } : {}),
+                  ...(phone ? { phone } : {}),
+                  ...(location.note ? { note: location.note } : {}),
+                  ...(location.orderCount
+                    ? { orderCount: location.orderCount }
+                    : {}),
+                  ...(location.priority ? { priority: true } : {}),
+                  ...(stop.locationId || !location.id
+                    ? {}
+                    : { locationId: location.id }),
+                }
+              : item
+          )
+        );
+      }
+    }
     setProofStopId(stop.id);
   };
 
@@ -1418,10 +1578,10 @@ export default function RouteScreen() {
     start: RouteLocation,
     end: RouteLocation,
     currentStops: RouteStop[]
-  ) => {
+  ): Promise<boolean> => {
     if (currentStops.length === 0) {
       Alert.alert('No stops', 'Add at least one address first.');
-      return;
+      return false;
     }
     setRouting(true);
     setRouteModalVisible(false);
@@ -1447,7 +1607,7 @@ export default function RouteScreen() {
       });
 
       updateActive({
-        stops: ordered,
+        stops: sortPriorityStops(dedupeRouteStops(ordered)),
         start,
         end,
         optimized: true,
@@ -1466,10 +1626,65 @@ export default function RouteScreen() {
           `Stops were sorted by distance because neither Google Routes nor the OpenStreetMap road-routing service could be reached. Check your connection and try again.${reason}`
         );
       }
+      return true;
     } catch (error: any) {
       Alert.alert('Optimization failed', error?.message || 'Try again.');
+      return false;
     } finally {
       setRouting(false);
+    }
+  };
+
+  const confirmStartRoute = async () => {
+    if (!activeRoute) return;
+    if (!startSetupStart) {
+      Alert.alert(
+        'Start location needed',
+        'Choose where you are starting the route.'
+      );
+      return;
+    }
+    const end = startSetupEnd || startSetupStart;
+    const merged = sortPriorityStops(
+      dedupeRouteStops([...stops, ...makeStopsFromPlan(myPendingForRoute)])
+    );
+    if (merged.length === 0) {
+      Alert.alert(
+        'No deliveries',
+        'There are no assigned deliveries or route stops to start with.'
+      );
+      return;
+    }
+
+    setStartSetupBusy(true);
+    try {
+      // Add the time spent paused so the running timer excludes breaks.
+      const pauseDelta = activeRoute.pausedAt
+        ? Math.max(0, Date.now() - activeRoute.pausedAt)
+        : 0;
+      const totalPausedMs = (activeRoute.totalPausedMs || 0) + pauseDelta;
+      updateActive({
+        stops: merged,
+        start: startSetupStart,
+        end,
+        optimized: false,
+        path: [],
+        distanceText: '',
+        durationText: '',
+        approximate: false,
+      });
+      const optimized = await runOptimization(startSetupStart, end, merged);
+      if (!optimized) return;
+      updateActive({
+        status: 'active',
+        startedAt: activeRoute.startedAt || Date.now(),
+        completedAt: undefined,
+        pausedAt: undefined,
+        totalPausedMs,
+      });
+      setStartSetupVisible(false);
+    } finally {
+      setStartSetupBusy(false);
     }
   };
 
@@ -1490,11 +1705,15 @@ export default function RouteScreen() {
     }
     const ordered = nearestNeighbourOrder(activeRoute.start, stops);
     updateActive({
-      stops: ordered.map((stop) => ({
-        ...stop,
-        etaText: undefined,
-        legDistanceText: undefined,
-      })),
+      stops: sortPriorityStops(
+        dedupeRouteStops(
+          ordered.map((stop) => ({
+            ...stop,
+            etaText: undefined,
+            legDistanceText: undefined,
+          }))
+        )
+      ),
       path: straightPath(activeRoute.start, ordered, activeRoute.end),
       optimized: true,
       approximate: true,
@@ -1591,103 +1810,259 @@ export default function RouteScreen() {
     }
   };
 
-  const assignWorker = (worker: SheetRow | null) => {
-    const assignee: RouteAssignee | null = worker
-      ? { workerId: worker.WorkerID || '', name: worker.Name || 'Worker' }
-      : null;
-    updateActive({ assignee });
-    setAssignModalVisible(false);
-  };
-
   // ---------------------------------------------------------------- render
   const statusActions = () => {
     if (!activeRoute) return null;
     if (activeRoute.status === 'completed') {
       return (
-        <View style={styles.routeCardActions}>
-          <TouchableOpacity
-            style={[styles.primaryAction, { backgroundColor: theme.accent }]}
-            onPress={() => duplicateRoute(activeRoute)}
-          >
-            <MaterialCommunityIcons
-              name="content-duplicate"
-              size={17}
-              color="#fff"
-            />
-            <Text style={styles.primaryActionText}>Repeat route</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.secondaryAction}
-            onPress={() => updateActive({ status: 'draft' })}
-          >
-            <Text style={[styles.secondaryActionText, { color: theme.accent }]}>
-              Reopen
+        <View>
+          <View style={[styles.startStatusButton, styles.completedStatusButton]}>
+            <Text style={styles.startStatusTitle}>Route completed</Text>
+            <Text style={styles.startStatusMeta}>
+              {routeElapsedText} · {deliveredCount} of {stops.length} delivered ·{' '}
+              {progress}%
             </Text>
-          </TouchableOpacity>
+            <View style={styles.startStatusBaselineTrack}>
+              <View
+                style={[
+                  styles.startStatusBaselineFill,
+                  { width: `${progress}%` },
+                ]}
+              />
+            </View>
+          </View>
+          <View style={[styles.routeCardActions, { marginTop: 10 }]}>
+            <TouchableOpacity
+              style={styles.secondaryAction}
+              onPress={() =>
+                updateActive({
+                  status: 'draft',
+                  completedAt: undefined,
+                  startedAt: undefined,
+                  pausedAt: undefined,
+                  totalPausedMs: 0,
+                })
+              }
+            >
+              <MaterialCommunityIcons
+                name="restart"
+                size={16}
+                color={theme.accent}
+              />
+              <Text
+                style={[styles.secondaryActionText, { color: theme.accent }]}
+              >
+                Reopen route
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       );
     }
     if (activeRoute.status === 'active') {
       return (
-        <View style={styles.routeCardActions}>
-          <TouchableOpacity
-            style={[styles.primaryAction, { backgroundColor: theme.accent }]}
-            onPress={confirmFinishRoute}
-          >
-            <MaterialCommunityIcons
-              name="flag-checkered"
-              size={17}
-              color="#fff"
-            />
-            <Text style={styles.primaryActionText}>Finish route</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.secondaryAction} onPress={pauseRoute}>
-            <MaterialCommunityIcons
-              name="pause"
-              size={16}
-              color={theme.accent}
-            />
-            <Text style={[styles.secondaryActionText, { color: theme.accent }]}>
-              Pause
+        <View>
+          <View style={[styles.startStatusButton, styles.runningStatusButton]}>
+            <Text style={styles.startStatusTitle}>Route running</Text>
+            <Text style={styles.startStatusMeta}>
+              {routeElapsedText} · {deliveredCount} of {stops.length} delivered ·{' '}
+              {progress}%
             </Text>
-          </TouchableOpacity>
+            <View style={styles.startStatusBaselineTrack}>
+              <View
+                style={[
+                  styles.startStatusBaselineFill,
+                  { width: `${progress}%` },
+                ]}
+              />
+            </View>
+          </View>
+          <View style={[styles.routeCardActions, { marginTop: 10 }]}>
+            <TouchableOpacity
+              style={[
+                styles.primaryAction,
+                { backgroundColor: theme.accent },
+                !allDelivered && styles.disabled,
+              ]}
+              onPress={confirmFinishRoute}
+              disabled={!allDelivered}
+            >
+              <MaterialCommunityIcons
+                name="flag-checkered"
+                size={17}
+                color="#fff"
+              />
+              <Text style={styles.primaryActionText}>Finish route</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.secondaryAction}
+              onPress={pauseRoute}
+            >
+              <MaterialCommunityIcons
+                name="pause"
+                size={16}
+                color={theme.accent}
+              />
+              <Text
+                style={[styles.secondaryActionText, { color: theme.accent }]}
+              >
+                Pause
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       );
     }
     return (
-      <View style={styles.routeCardActions}>
-        <TouchableOpacity
-          style={[
-            styles.primaryAction,
-            { backgroundColor: theme.accent },
-            stops.length === 0 && styles.disabled,
-          ]}
-          onPress={startRoute}
-          disabled={stops.length === 0}
-        >
-          <MaterialCommunityIcons
-            name="navigation-variant"
-            size={17}
-            color="#fff"
+      <TouchableOpacity
+        style={[
+          styles.startStatusButton,
+          stops.length === 0 &&
+            myPendingForRoute.length === 0 &&
+            styles.disabled,
+        ]}
+        onPress={startRoute}
+        disabled={stops.length === 0 && myPendingForRoute.length === 0}
+        activeOpacity={0.85}
+        accessibilityLabel="Start route"
+      >
+        <Text style={styles.startStatusTitle}>
+          {activeRoute.pausedAt ? 'Resume route' : 'Start route'}
+        </Text>
+        <Text style={styles.startStatusMeta}>
+          {deliveredCount} of {stops.length} delivered · {progress}%
+        </Text>
+        <View style={styles.startStatusBaselineTrack}>
+          <View
+            style={[
+              styles.startStatusBaselineFill,
+              { width: `${progress}%` },
+            ]}
           />
-          <Text style={styles.primaryActionText}>Start route</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={styles.secondaryAction}
-          onPress={() => setRoutesModalVisible(true)}
-        >
-          <MaterialCommunityIcons
-            name="tray-arrow-down"
-            size={16}
-            color={theme.accent}
-          />
-          <Text style={[styles.secondaryActionText, { color: theme.accent }]}>
-            Switch
-          </Text>
-        </TouchableOpacity>
-      </View>
+        </View>
+      </TouchableOpacity>
     );
   };
+
+  // Admins do not run a personal route: their Route tab is the delivery
+  // control room for the whole team.
+  if (isAdmin) {
+    return (
+      <View style={styles.container}>
+        <View style={[styles.header, { backgroundColor: theme.headerBg }]}>
+          <View style={styles.headerText}>
+            <Text style={[styles.title, { color: theme.headerText }]}>
+              Delivery control
+            </Text>
+            <Text style={[styles.subtitle, { color: theme.headerMuted }]}>
+              Add every delivery for today, optimize and track each order
+            </Text>
+          </View>
+          <View style={styles.headerActions}>
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => router.push('/delivery-proofs')}
+              accessibilityLabel="Delivery proof gallery"
+            >
+              <MaterialCommunityIcons
+                name="image-multiple-outline"
+                size={20}
+                color={theme.headerText}
+              />
+              {pendingProofUploads > 0 && (
+                <View style={styles.headerBadge}>
+                  <Text style={styles.headerBadgeText}>
+                    {pendingProofUploads}
+                  </Text>
+                </View>
+              )}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => router.push('/delivery-team')}
+              accessibilityLabel="Team delivery tracking"
+            >
+              <MaterialCommunityIcons
+                name="account-search-outline"
+                size={20}
+                color={theme.headerText}
+              />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.headerButton}
+              onPress={() => router.push('/delivery-settings')}
+              accessibilityLabel="Delivery settings"
+            >
+              <MaterialCommunityIcons
+                name="cog-outline"
+                size={20}
+                color={theme.headerText}
+              />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.content}
+          showsVerticalScrollIndicator={false}
+        >
+          <DeliveryControlPanel
+            sheetId={sheetId}
+            locations={deliveryLocations}
+            workers={workerSpots}
+            distribution={distribution}
+            theme={theme}
+            actor={{
+              workerId: user.workerProfile?.workerId || myRow?.WorkerID || '',
+              name: user.name || myRow?.Name || 'Admin',
+              isManager: false,
+            }}
+            canOptimize
+            onRefresh={reloadDeliveryData}
+          />
+
+          <TouchableOpacity
+            style={[styles.adminToolCard, { borderColor: theme.accentBorder }]}
+            onPress={() => router.push('/delivery-team')}
+            activeOpacity={0.85}
+          >
+            <View
+              style={[styles.adminToolIcon, { backgroundColor: theme.accentSoft }]}
+            >
+              <MaterialCommunityIcons
+                name="chart-timeline-variant"
+                size={19}
+                color={theme.accent}
+              />
+            </View>
+            <View style={styles.adminToolInfo}>
+              <Text style={styles.adminToolTitle}>Track every order</Text>
+              <Text style={styles.adminToolSubtitle}>
+                See every employee’s current stop, delivered orders and ETA.
+              </Text>
+            </View>
+            <MaterialCommunityIcons
+              name="chevron-right"
+              size={20}
+              color="#94A3B8"
+            />
+          </TouchableOpacity>
+
+          <View style={styles.adminNote}>
+            <MaterialCommunityIcons
+              name="shield-check-outline"
+              size={14}
+              color="#64748B"
+            />
+            <Text style={styles.adminNoteText}>
+              Managers can assign, remove or edit deliveries. Every manager
+              change appears in the admin’s Alerts tab.
+            </Text>
+          </View>
+        </ScrollView>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -1754,22 +2129,6 @@ export default function RouteScreen() {
           )}
           <TouchableOpacity
             style={styles.headerButton}
-            onPress={() => setRoutesModalVisible(true)}
-            accessibilityLabel="Saved routes"
-          >
-            <MaterialCommunityIcons
-              name="format-list-checks"
-              size={21}
-              color={theme.headerText}
-            />
-            {routes.length > 1 && (
-              <View style={styles.headerBadge}>
-                <Text style={styles.headerBadgeText}>{routes.length}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerButton}
             onPress={shareRoute}
             accessibilityLabel="Share route"
           >
@@ -1790,199 +2149,107 @@ export default function RouteScreen() {
         {/* Active route summary */}
         {activeRoute && (
           <View style={[styles.routeCard, { borderColor: theme.accentBorder }]}>
-            <View style={styles.routeCardTop}>
-              <View style={styles.routeNameWrap}>
-                <Text style={styles.routeName} numberOfLines={1}>
-                  {activeRoute.name}
-                </Text>
-                <View style={styles.routeMetaRow}>
+            {statusActions()}
+
+            {/* Next stop & delivery actions sit directly under Finish route so
+                a driver can navigate without scrolling the whole screen. */}
+            {activeRoute.status === 'active' && nextStop && (
+              <View style={styles.nextInline}>
+                <View style={styles.nextHeader} pointerEvents="none">
                   <View
-                    style={[
-                      styles.statusChip,
-                      { backgroundColor: statusMeta.background },
-                    ]}
+                    style={[styles.nextBadge, { backgroundColor: theme.accent }]}
                   >
                     <MaterialCommunityIcons
-                      name={statusMeta.icon as any}
+                      name="navigation-variant"
                       size={11}
-                      color={statusMeta.color}
+                      color="#fff"
                     />
-                    <Text
-                      style={[styles.statusChipText, { color: statusMeta.color }]}
-                    >
-                      {statusMeta.label}
-                    </Text>
+                    <Text style={styles.nextBadgeText}>NEXT STOP</Text>
                   </View>
-                  <TouchableOpacity
-                    style={styles.metaLink}
-                    onPress={() => openRenameRoute(activeRoute)}
-                  >
+                  {nextStop.priority && (
+                    <View
+                      style={[styles.nextBadge, styles.priorityNextBadge]}
+                    >
+                      <MaterialCommunityIcons
+                        name="star"
+                        size={10}
+                        color="#fff"
+                      />
+                      <Text style={styles.nextBadgeText}>PRIORITY</Text>
+                    </View>
+                  )}
+                  <Text style={styles.nextCounter}>
+                    {nextStopIndex + 1} of {stops.length}
+                  </Text>
+                  {!!nextStop.etaText && (
+                    <Text style={[styles.nextEta, { color: theme.accentDark }]}>
+                      ETA {nextStop.etaText}
+                    </Text>
+                  )}
+                </View>
+                <Text style={styles.nextAddress}>{nextStop.address}</Text>
+                {!!(nextStop.contactName || nextStop.phone) && (
+                  <View style={styles.nextContactRow}>
                     <MaterialCommunityIcons
-                      name="pencil-outline"
-                      size={13}
+                      name="account-outline"
+                      size={12}
                       color="#64748B"
                     />
-                    <Text style={styles.metaLinkText}>Rename</Text>
+                    <Text style={styles.nextContactText} numberOfLines={1}>
+                      {[nextStop.contactName, nextStop.phone]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+                  </View>
+                )}
+                {!!nextStop.note && (
+                  <Text style={styles.nextNote}>{nextStop.note}</Text>
+                )}
+                <View style={styles.nextActions}>
+                  <TouchableOpacity
+                    style={[styles.nextNav, { backgroundColor: theme.accent }]}
+                    onPress={() => navigateToStop(nextStop)}
+                  >
+                    <MaterialCommunityIcons
+                      name="navigation"
+                      size={17}
+                      color="#fff"
+                    />
+                    <Text style={styles.nextNavText}>Navigate</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.nextDone}
+                    onPress={() => openProofForStop(nextStop)}
+                  >
+                    <MaterialCommunityIcons
+                      name="package-variant-closed-check"
+                      size={17}
+                      color="#15803D"
+                    />
+                    <Text style={styles.nextDoneText}>Mark delivery</Text>
                   </TouchableOpacity>
                 </View>
-                <TouchableOpacity
-                  style={styles.assigneeRow}
-                  onPress={() => setAssignModalVisible(true)}
-                  disabled={!canAssign}
-                >
-                  <MaterialCommunityIcons
-                    name="account-circle-outline"
-                    size={15}
-                    color={activeRoute.assignee ? theme.accentDark : '#94A3B8'}
-                  />
-                  <Text
-                    style={[
-                      styles.assigneeText,
-                      activeRoute.assignee && { color: theme.accentDark },
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {activeRoute.assignee
-                      ? `Assigned to ${activeRoute.assignee.name}`
-                      : canAssign
-                      ? 'Assign this route to a worker'
-                      : 'Not assigned'}
-                  </Text>
-                  {canAssign && (
-                    <MaterialCommunityIcons
-                      name="chevron-right"
-                      size={15}
-                      color="#94A3B8"
-                    />
-                  )}
-                </TouchableOpacity>
               </View>
-              <TouchableOpacity
-                style={styles.moreButton}
-                onPress={() => setRoutesModalVisible(true)}
-              >
-                <MaterialCommunityIcons
-                  name="dots-horizontal"
-                  size={20}
-                  color="#64748B"
-                />
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.progressHeader}>
-              <Text style={styles.progressText}>
-                {deliveredCount} of {stops.length} delivered
-              </Text>
-              <Text style={[styles.progressPercent, { color: theme.accentDark }]}>
-                {progress}%
-              </Text>
-            </View>
-            <View style={styles.progressTrack}>
-              <View
-                style={[
-                  styles.progressFill,
-                  { width: `${progress}%`, backgroundColor: theme.accent },
-                ]}
-              />
-            </View>
-
-            <View style={styles.statRow}>
-              <View style={styles.statBlock}>
-                <Text style={styles.statValue}>
-                  {activeRoute.distanceText || '—'}
-                </Text>
-                <Text style={styles.statLabel}>Distance</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.statBlock}>
-                <Text style={styles.statValue}>
-                  {activeRoute.durationText || '—'}
-                </Text>
-                <Text style={styles.statLabel}>Drive</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.statBlock}>
-                <Text style={styles.statValue}>{pendingCount}</Text>
-                <Text style={styles.statLabel}>Pending</Text>
-              </View>
-              <View style={styles.statDivider} />
-              <View style={styles.statBlock}>
-                <Text style={styles.statValue}>
-                  {activeRoute.optimized ? 'Optimized' : 'Original'}
-                </Text>
-                <Text style={styles.statLabel}>Order</Text>
-              </View>
-            </View>
-
-            {statusActions()}
+            )}
           </View>
         )}
 
-        {/* Shared delivery operations for admins/managers. */}
+        {/* Shared delivery control for admins/managers. */}
         {canAssign && (
-          <View style={[styles.opsCard, { borderColor: theme.accentBorder }]}>
-            <View style={styles.opsTop}>
-              <View
-                style={[styles.opsIcon, { backgroundColor: theme.accentSoft }]}
-              >
-                <MaterialCommunityIcons
-                  name="account-group-outline"
-                  size={20}
-                  color={theme.accent}
-                />
-              </View>
-              <View style={styles.opsInfo}>
-                <Text style={styles.opsTitle}>Delivery operations</Text>
-                <Text style={styles.opsSubtitle} numberOfLines={2}>
-                  {distribution.pendingTotal} pending ·{' '}
-                  {distribution.deliveredTotal} delivered ·{' '}
-                  {distribution.spotsSet} employee spot
-                  {distribution.spotsSet === 1 ? '' : 's'} ·{' '}
-                  {distribution.unassigned.length} unassigned
-                </Text>
-              </View>
-              <View style={styles.opsEtaWrap}>
-                <Text style={[styles.opsEta, { color: theme.accentDark }]}>
-                  {formatDeliveryEta(
-                    distribution.plans.reduce(
-                      (longest, plan) =>
-                        Math.max(longest, plan.estimatedMinutes),
-                      0
-                    )
-                  )}
-                </Text>
-                <Text style={styles.opsEtaLabel}>longest ETA</Text>
-              </View>
-            </View>
-            <View style={styles.opsActions}>
-              <TouchableOpacity
-                style={[styles.opsButton, { backgroundColor: theme.accent }]}
-                onPress={() => router.push('/delivery-locations')}
-              >
-                <MaterialCommunityIcons
-                  name="map-marker-multiple-outline"
-                  size={16}
-                  color="#fff"
-                />
-                <Text style={styles.opsButtonText}>Locations & spots</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.opsButtonOutline}
-                onPress={() => router.push('/delivery-team')}
-              >
-                <MaterialCommunityIcons
-                  name="account-search-outline"
-                  size={16}
-                  color={theme.accent}
-                />
-                <Text
-                  style={[styles.opsButtonText, { color: theme.accent }]}
-                >
-                  Team tracking
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+          <DeliveryControlPanel
+            sheetId={sheetId}
+            locations={deliveryLocations}
+            workers={workerSpots}
+            distribution={distribution}
+            theme={theme}
+            actor={{
+              workerId: user.workerProfile?.workerId || myRow?.WorkerID || '',
+              name: user.name || myRow?.Name || 'Manager',
+              isManager,
+            }}
+            canOptimize={isAdmin}
+            onRefresh={reloadDeliveryData}
+          />
         )}
 
         {/* The employee's own spot and automatically assigned deliveries. */}
@@ -2043,7 +2310,7 @@ export default function RouteScreen() {
                     { color: theme.accentDark },
                   ]}
                 >
-                  {myPlan.pending.length} left
+                  {myAssignedPending.length} left
                 </Text>
               </View>
             </View>
@@ -2051,38 +2318,43 @@ export default function RouteScreen() {
             <View style={styles.mySpotRouteStats}>
               <View style={styles.mySpotRouteStat}>
                 <Text style={styles.mySpotRouteValue}>
-                  {myPlan.pending.length}
+                  {formatDistance(myAssignedDistance)}
                 </Text>
-                <Text style={styles.mySpotRouteStatLabel}>Remaining</Text>
+                <Text style={styles.mySpotRouteStatLabel}>Distance</Text>
               </View>
-              <View style={styles.statDivider} />
-              <View style={styles.mySpotRouteStat}>
-                <Text style={[styles.mySpotRouteValue, { color: '#15803D' }]}>
-                  {myPlan.delivered.length}
-                </Text>
-                <Text style={styles.mySpotRouteStatLabel}>Delivered</Text>
-              </View>
-              <View style={styles.statDivider} />
               <View style={styles.mySpotRouteStat}>
                 <Text style={styles.mySpotRouteValue}>
-                  {formatDeliveryEta(myPlan.estimatedMinutes)}
+                  {myDriveMinutes > 0 ? `${myDriveMinutes} min` : '—'}
+                </Text>
+                <Text style={styles.mySpotRouteStatLabel}>Drive</Text>
+              </View>
+              <View style={styles.mySpotRouteStat}>
+                <Text style={styles.mySpotRouteValue}>{myOrdersToday}</Text>
+                <Text style={styles.mySpotRouteStatLabel}>Orders</Text>
+              </View>
+              <View style={styles.mySpotRouteStat}>
+                <Text style={styles.mySpotRouteValue}>{myLocationsToday}</Text>
+                <Text style={styles.mySpotRouteStatLabel}>Locations</Text>
+              </View>
+              <View style={styles.mySpotRouteStat}>
+                <Text style={styles.mySpotRouteValue}>
+                  {formatDeliveryEta(myAssignedEstimate?.minutes || 0)}
                 </Text>
                 <Text style={styles.mySpotRouteStatLabel}>Est. time</Text>
               </View>
-              <View style={styles.statDivider} />
               <View style={styles.mySpotRouteStat}>
                 <Text style={styles.mySpotRouteValue}>
-                  {myPlan.ordersPending}
+                  {myAssignedOrdersPending}
                 </Text>
-                <Text style={styles.mySpotRouteStatLabel}>Orders left</Text>
+                <Text style={styles.mySpotRouteStatLabel}>Pending orders</Text>
               </View>
             </View>
 
-            {!!myPlan.current && (
+            {!!myAssignedPending[0] && (
               <TouchableOpacity
                 style={styles.mySpotCurrent}
                 onPress={() =>
-                  void openDirectionsTo(myPlan.current!, myPlan.worker.spot)
+                  void openDirectionsTo(myAssignedPending[0], myPlan.worker.spot)
                 }
               >
                 <MaterialCommunityIcons
@@ -2096,7 +2368,7 @@ export default function RouteScreen() {
                     style={styles.mySpotCurrentAddress}
                     numberOfLines={2}
                   >
-                    {myPlan.current.address}
+                    {myAssignedPending[0].address}
                   </Text>
                 </View>
                 <MaterialCommunityIcons
@@ -2132,175 +2404,33 @@ export default function RouteScreen() {
           </View>
         )}
 
-        {activeRoute && stops.length > 0 && (
-          <View style={[styles.daySummary, { borderColor: theme.accentBorder }]}>
-            <View style={styles.daySummaryTop}>
-              <View
-                style={[
-                  styles.daySummaryIcon,
-                  { backgroundColor: theme.accentSoft },
-                ]}
-              >
-                <MaterialCommunityIcons
-                  name="chart-box-outline"
-                  size={18}
-                  color={theme.accent}
-                />
-              </View>
-              <View style={styles.daySummaryTitleWrap}>
-                <Text style={styles.daySummaryTitle}>Delivery summary</Text>
-                <Text style={styles.daySummarySubtitle}>
-                  {routeProofStats.deliveredWithProof} of{' '}
-                  {routeProofStats.deliveredStops} delivered stop
-                  {routeProofStats.deliveredStops === 1 ? '' : 's'} with proof
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={[
-                  styles.daySummaryLink,
-                  { borderColor: theme.accentBorder },
-                ]}
-                onPress={() => router.push('/delivery-proofs')}
-              >
-                <MaterialCommunityIcons
-                  name="image-multiple-outline"
-                  size={13}
-                  color={theme.accent}
-                />
-                <Text
-                  style={[styles.daySummaryLinkText, { color: theme.accent }]}
-                >
-                  Proofs
-                </Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.daySummaryStats}>
-              <View style={styles.daySummaryStat}>
-                <Text style={styles.daySummaryValue}>
-                  {deliveredCount}/{stops.length}
-                </Text>
-                <Text style={styles.daySummaryLabel}>Deliveries</Text>
-              </View>
-              <View style={styles.daySummaryDivider} />
-              <View style={styles.daySummaryStat}>
-                <Text style={styles.daySummaryValue}>
-                  {routeProofStats.ordersDelivered}
-                </Text>
-                <Text style={styles.daySummaryLabel}>Orders</Text>
-              </View>
-              <View style={styles.daySummaryDivider} />
-              <View style={styles.daySummaryStat}>
-                <Text style={styles.daySummaryValue}>
-                  {routeProofStats.deliveredWithProof}/
-                  {routeProofStats.deliveredStops}
-                </Text>
-                <Text style={styles.daySummaryLabel}>With proof</Text>
-              </View>
-              <View style={styles.daySummaryDivider} />
-              <View style={styles.daySummaryStat}>
-                <Text style={styles.daySummaryValue}>
-                  {routeProofStats.uploaded}
-                </Text>
-                <Text style={styles.daySummaryLabel}>Uploaded</Text>
-              </View>
-            </View>
-
-            <View style={styles.daySummaryFooter}>
+        {!canAssign && (
+          <TouchableOpacity
+            style={[styles.employeeProofCard, { borderColor: theme.accentBorder }]}
+            onPress={() => router.push('/delivery-proofs')}
+            activeOpacity={0.85}
+          >
+            <View
+              style={[styles.employeeProofIcon, { backgroundColor: theme.accentSoft }]}
+            >
               <MaterialCommunityIcons
-                name={
-                  routeProofStats.pending > 0
-                    ? 'cloud-clock-outline'
-                    : 'cloud-check-outline'
-                }
-                size={12}
-                color={routeProofStats.pending > 0 ? '#B45309' : '#15803D'}
+                name="image-multiple-outline"
+                size={19}
+                color={theme.accent}
               />
-              <Text
-                style={[
-                  styles.daySummaryFooterText,
-                  {
-                    color:
-                      routeProofStats.pending > 0 ? '#B45309' : '#15803D',
-                  },
-                ]}
-              >
-                {routeProofStats.pending > 0
-                  ? `${routeProofStats.pending} proof photo${
-                      routeProofStats.pending === 1 ? '' : 's'
-                    } waiting to upload`
-                  : 'All proof photos are safely uploaded'}
+            </View>
+            <View style={styles.employeeProofInfo}>
+              <Text style={styles.employeeProofTitle}>Today’s delivery proofs</Text>
+              <Text style={styles.employeeProofSubtitle}>
+                View every proof photo captured for today
               </Text>
             </View>
-          </View>
-        )}
-
-        {/* Next stop / active navigation */}
-        {activeRoute?.status === 'active' && nextStop && (
-          <View style={[styles.nextCard, { borderColor: theme.accentBorder }]}>
-            <View style={styles.nextHeader}>
-              <View
-                style={[styles.nextBadge, { backgroundColor: theme.accent }]}
-              >
-                <MaterialCommunityIcons
-                  name="navigation-variant"
-                  size={11}
-                  color="#fff"
-                />
-                <Text style={styles.nextBadgeText}>NEXT STOP</Text>
-              </View>
-              <Text style={styles.nextCounter}>
-                {nextStopIndex + 1} of {stops.length}
-              </Text>
-              {!!nextStop.etaText && (
-                <Text style={[styles.nextEta, { color: theme.accentDark }]}>
-                  ETA {nextStop.etaText}
-                </Text>
-              )}
-            </View>
-            <Text style={styles.nextAddress}>{nextStop.address}</Text>
-            {!!(nextStop.contactName || nextStop.phone) && (
-              <View style={styles.nextContactRow}>
-                <MaterialCommunityIcons
-                  name="account-outline"
-                  size={12}
-                  color="#64748B"
-                />
-                <Text style={styles.nextContactText} numberOfLines={1}>
-                  {[nextStop.contactName, nextStop.phone]
-                    .filter(Boolean)
-                    .join(' · ')}
-                </Text>
-              </View>
-            )}
-            {!!nextStop.note && (
-              <Text style={styles.nextNote}>{nextStop.note}</Text>
-            )}
-            <View style={styles.nextActions}>
-              <TouchableOpacity
-                style={[styles.nextNav, { backgroundColor: theme.accent }]}
-                onPress={() => navigateToStop(nextStop)}
-              >
-                <MaterialCommunityIcons
-                  name="navigation"
-                  size={17}
-                  color="#fff"
-                />
-                <Text style={styles.nextNavText}>Navigate</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.nextDone}
-                onPress={() => openProofForStop(nextStop)}
-              >
-                <MaterialCommunityIcons
-                  name="package-variant-closed-check"
-                  size={17}
-                  color="#15803D"
-                />
-                <Text style={styles.nextDoneText}>Mark delivery</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+            <MaterialCommunityIcons
+              name="chevron-right"
+              size={20}
+              color="#94A3B8"
+            />
+          </TouchableOpacity>
         )}
 
         {activeRoute?.status === 'active' && allDelivered && (
@@ -2695,6 +2825,28 @@ export default function RouteScreen() {
                         </Text>
                       )}
                       <View style={styles.stopMetaRow}>
+                        {stop.priority && (
+                          <View
+                            style={[
+                              styles.stopMetaChip,
+                              styles.priorityChip,
+                            ]}
+                          >
+                            <MaterialCommunityIcons
+                              name="star"
+                              size={10}
+                              color="#B45309"
+                            />
+                            <Text
+                              style={[
+                                styles.stopMetaText,
+                                { color: '#B45309' },
+                              ]}
+                            >
+                              High priority
+                            </Text>
+                          </View>
+                        )}
                         {!!stop.etaText && (
                           <View
                             style={[
@@ -2830,342 +2982,9 @@ export default function RouteScreen() {
               />
               <Text style={styles.footerActionText}>Copy</Text>
             </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.footerAction}
-              onPress={() => duplicateRoute(activeRoute!)}
-            >
-              <MaterialCommunityIcons
-                name="content-duplicate"
-                size={17}
-                color="#475569"
-              />
-              <Text style={styles.footerActionText}>Duplicate</Text>
-            </TouchableOpacity>
           </View>
         )}
       </ScrollView>
-
-      {/* ------------------------------------------------------ Saved routes */}
-      <Modal
-        visible={routesModalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setRoutesModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, styles.sheetCard]}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>My routes</Text>
-                <Text style={styles.modalSubtitle}>
-                  {routes.length} saved on this device
-                </Text>
-              </View>
-              <TouchableOpacity onPress={() => setRoutesModalVisible(false)}>
-                <MaterialCommunityIcons
-                  name="close"
-                  size={22}
-                  color="#334155"
-                />
-              </TouchableOpacity>
-            </View>
-
-            <TouchableOpacity
-              style={[styles.newRouteButton, { borderColor: theme.accent }]}
-              onPress={openCreateRoute}
-            >
-              <MaterialCommunityIcons
-                name="plus"
-                size={18}
-                color={theme.accent}
-              />
-              <Text style={[styles.newRouteText, { color: theme.accent }]}>
-                New route
-              </Text>
-            </TouchableOpacity>
-
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {sortedRoutes.length === 0 ? (
-                <Text style={styles.emptyModalText}>
-                  No routes yet. Create one to get started.
-                </Text>
-              ) : (
-                sortedRoutes.map((route) => {
-                  const routeStatus = STATUS_META[route.status];
-                  const delivered = routeDeliveredCount(route);
-                  const pct = routeProgress(route);
-                  const selected = route.id === activeId;
-                  return (
-                    <View
-                      key={route.id}
-                      style={[
-                        styles.routeListCard,
-                        selected && {
-                          borderColor: theme.accent,
-                          backgroundColor: theme.accentSoft,
-                        },
-                      ]}
-                    >
-                      <TouchableOpacity
-                        style={styles.routeListMain}
-                        onPress={() => selectRoute(route.id)}
-                        activeOpacity={0.8}
-                      >
-                        <View style={styles.routeListTop}>
-                          <Text style={styles.routeListName} numberOfLines={1}>
-                            {route.name}
-                          </Text>
-                          <View
-                            style={[
-                              styles.statusChip,
-                              { backgroundColor: routeStatus.background },
-                            ]}
-                          >
-                            <Text
-                              style={[
-                                styles.statusChipText,
-                                { color: routeStatus.color },
-                              ]}
-                            >
-                              {routeStatus.label}
-                            </Text>
-                          </View>
-                        </View>
-                        <Text style={styles.routeListMeta} numberOfLines={1}>
-                          {route.stops.length} stop
-                          {route.stops.length === 1 ? '' : 's'} · {delivered}{' '}
-                          delivered
-                          {route.distanceText ? ` · ${route.distanceText}` : ''}
-                          {route.assignee?.name
-                            ? ` · ${route.assignee.name}`
-                            : ''}
-                        </Text>
-                        <View style={styles.routeListProgress}>
-                          <View style={[styles.progressTrack, { flex: 1 }]}>
-                            <View
-                              style={[
-                                styles.progressFill,
-                                {
-                                  width: `${pct}%`,
-                                  backgroundColor: theme.accent,
-                                },
-                              ]}
-                            />
-                          </View>
-                          <Text style={styles.routeListPct}>{pct}%</Text>
-                        </View>
-                        <Text style={styles.routeListUpdated}>
-                          Updated {formatShortDate(route.updatedAt)}
-                        </Text>
-                      </TouchableOpacity>
-                      <View style={styles.routeListActions}>
-                        <TouchableOpacity
-                          style={styles.iconAction}
-                          onPress={() => duplicateRoute(route)}
-                          accessibilityLabel="Duplicate route"
-                        >
-                          <MaterialCommunityIcons
-                            name="content-duplicate"
-                            size={16}
-                            color="#475569"
-                          />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.iconAction}
-                          onPress={() => openRenameRoute(route)}
-                          accessibilityLabel="Rename route"
-                        >
-                          <MaterialCommunityIcons
-                            name="pencil-outline"
-                            size={16}
-                            color="#475569"
-                          />
-                        </TouchableOpacity>
-                        <TouchableOpacity
-                          style={styles.iconAction}
-                          onPress={() => deleteRoute(route)}
-                          accessibilityLabel="Delete route"
-                        >
-                          <MaterialCommunityIcons
-                            name="delete-outline"
-                            size={16}
-                            color="#DC2626"
-                          />
-                        </TouchableOpacity>
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
-
-      {/* ------------------------------------------------------ Create / rename */}
-      <Modal
-        visible={nameModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setNameModalVisible(false)}
-      >
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>
-              {nameMode === 'create' ? 'New route' : 'Rename route'}
-            </Text>
-            <Text style={styles.modalSubtitle}>
-              Use a name your team will recognise, like “North deliveries”.
-            </Text>
-            <TextInput
-              style={styles.nameInput}
-              value={nameDraft}
-              onChangeText={setNameDraft}
-              placeholder="Route name"
-              placeholderTextColor="#94A3B8"
-              autoFocus
-              returnKeyType="done"
-              onSubmitEditing={submitName}
-            />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={styles.modalCancel}
-                onPress={() => setNameModalVisible(false)}
-              >
-                <Text style={styles.modalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalPrimary, { backgroundColor: theme.accent }]}
-                onPress={submitName}
-              >
-                <Text style={styles.modalPrimaryText}>
-                  {nameMode === 'create' ? 'Create route' : 'Save name'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* ------------------------------------------------------ Assign worker */}
-      <Modal
-        visible={assignModalVisible}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setAssignModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalCard, styles.sheetCard]}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Assign route</Text>
-                <Text style={styles.modalSubtitle}>
-                  Choose who will run this route.
-                </Text>
-              </View>
-              <TouchableOpacity onPress={() => setAssignModalVisible(false)}>
-                <MaterialCommunityIcons
-                  name="close"
-                  size={22}
-                  color="#334155"
-                />
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.workerSearch}>
-              <MaterialCommunityIcons
-                name="magnify"
-                size={16}
-                color="#64748B"
-              />
-              <TextInput
-                style={styles.workerSearchInput}
-                value={workerQuery}
-                onChangeText={setWorkerQuery}
-                placeholder="Search workers"
-                placeholderTextColor="#94A3B8"
-              />
-            </View>
-
-            <TouchableOpacity
-              style={styles.workerRow}
-              onPress={() => assignWorker(null)}
-            >
-              <View style={[styles.workerAvatar, { backgroundColor: '#E2E8F0' }]}>
-                <MaterialCommunityIcons
-                  name="account-off-outline"
-                  size={18}
-                  color="#64748B"
-                />
-              </View>
-              <View style={styles.workerInfo}>
-                <Text style={styles.workerName}>Unassigned</Text>
-                <Text style={styles.workerRole}>No one is responsible</Text>
-              </View>
-              {!activeRoute?.assignee && (
-                <MaterialCommunityIcons
-                  name="check-circle"
-                  size={20}
-                  color={theme.accent}
-                />
-              )}
-            </TouchableOpacity>
-
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {filteredWorkers.map((worker) => {
-                const selected =
-                  activeRoute?.assignee?.workerId === worker.WorkerID;
-                return (
-                  <TouchableOpacity
-                    key={`${worker.WorkerID}-${worker._row}`}
-                    style={styles.workerRow}
-                    onPress={() => assignWorker(worker)}
-                  >
-                    <View
-                      style={[
-                        styles.workerAvatar,
-                        { backgroundColor: theme.accentSoft },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.workerAvatarText,
-                          { color: theme.accentDark },
-                        ]}
-                      >
-                        {initials(worker.Name)}
-                      </Text>
-                    </View>
-                    <View style={styles.workerInfo}>
-                      <Text style={styles.workerName} numberOfLines={1}>
-                        {worker.Name || worker.WorkerID}
-                      </Text>
-                      <Text style={styles.workerRole} numberOfLines={1}>
-                        {worker.Designation || 'Employee'}
-                      </Text>
-                    </View>
-                    {selected && (
-                      <MaterialCommunityIcons
-                        name="check-circle"
-                        size={20}
-                        color={theme.accent}
-                      />
-                    )}
-                  </TouchableOpacity>
-                );
-              })}
-              {filteredWorkers.length === 0 && (
-                <Text style={styles.emptyModalText}>
-                  No workers found. Add workers from the Workers tab first.
-                </Text>
-              )}
-            </ScrollView>
-          </View>
-        </View>
-      </Modal>
 
       {/* ------------------------------------------------------ Manual add */}
       <Modal
@@ -3309,12 +3128,94 @@ export default function RouteScreen() {
                 <Text style={styles.modalCancelText}>Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.modalPrimary, { backgroundColor: theme.accent }]}
-                onPress={savePendingStop}
+                style={[
+                  styles.modalPrimary,
+                  { backgroundColor: theme.accent },
+                  !canSavePendingStop && styles.disabled,
+                ]}
+                onPress={() => void savePendingStop()}
+                disabled={!canSavePendingStop}
               >
                 <Text style={styles.modalPrimaryText}>Save stop</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ------------------------------------------------------ Start route */}
+      <Modal
+        visible={startSetupVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => {
+          if (!startSetupBusy) setStartSetupVisible(false);
+        }}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.modalOverlay}
+        >
+          <View style={[styles.modalCard, styles.sheetCard]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Start route</Text>
+                <Text style={styles.modalSubtitle}>
+                  Set where you begin and finish. Your assigned deliveries are
+                  added and optimized automatically.
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setStartSetupVisible(false)}
+                disabled={startSetupBusy}
+              >
+                <MaterialCommunityIcons
+                  name="close"
+                  size={22}
+                  color="#334155"
+                />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView keyboardShouldPersistTaps="handled">
+              <LocationPicker
+                label="Start location"
+                value={startSetupStart}
+                onChange={setStartSetupStart}
+                onClear={() => setStartSetupStart(null)}
+                accent={theme.accent}
+                placeholder="Search start or use current location"
+              />
+              <LocationPicker
+                label="End location"
+                value={startSetupEnd}
+                onChange={setStartSetupEnd}
+                onClear={() => setStartSetupEnd(null)}
+                accent={theme.accent}
+                placeholder="Search end (optional)"
+              />
+              <Text style={styles.startSetupHint}>
+                Leave the end empty to finish back at the start.
+              </Text>
+              <TouchableOpacity
+                style={[
+                  styles.startButton,
+                  { backgroundColor: theme.accent },
+                  (!startSetupStart || startSetupBusy || routing) &&
+                    styles.disabled,
+                ]}
+                onPress={() => void confirmStartRoute()}
+                disabled={!startSetupStart || startSetupBusy || routing}
+              >
+                {startSetupBusy || routing ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.startButtonText}>
+                    Start & optimize route
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -3664,6 +3565,27 @@ export default function RouteScreen() {
                   </Text>
                 </View>
 
+                <TouchableOpacity
+                  style={[
+                    styles.detailPriority,
+                    detailStop.priority && styles.detailPriorityActive,
+                  ]}
+                  onPress={() =>
+                    setStopPriority(detailStop, !detailStop.priority)
+                  }
+                >
+                  <MaterialCommunityIcons
+                    name={detailStop.priority ? 'star' : 'star-outline'}
+                    size={18}
+                    color="#B45309"
+                  />
+                  <Text style={styles.detailPriorityText}>
+                    {detailStop.priority
+                      ? 'High priority · deliver first'
+                      : 'Mark as high priority'}
+                  </Text>
+                </TouchableOpacity>
+
                 {/* Map + call logo buttons. */}
                 <View style={styles.detailActions}>
                   <View style={styles.detailActionItem}>
@@ -3908,6 +3830,25 @@ export default function RouteScreen() {
               onPress={() => {
                 const stop = menuStop;
                 setMenuStopId(null);
+                if (stop) setStopPriority(stop, !stop.priority);
+              }}
+            >
+              <MaterialCommunityIcons
+                name={menuStop?.priority ? 'star-off' : 'star-outline'}
+                size={18}
+                color="#D97706"
+              />
+              <Text style={styles.menuOptionText}>
+                {menuStop?.priority
+                  ? 'Remove high priority'
+                  : 'Mark as high priority'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.menuOption}
+              onPress={() => {
+                const stop = menuStop;
+                setMenuStopId(null);
                 if (stop) deleteStop(stop);
               }}
             >
@@ -4053,35 +3994,51 @@ const styles = StyleSheet.create({
   },
   moreButton: { padding: 4 },
 
-  progressHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 14,
-  },
-  progressText: { fontSize: 11, color: '#64748B', fontWeight: '700' },
-  progressPercent: { fontSize: 11, fontWeight: '800' },
-  progressTrack: {
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#E2E8F0',
-    overflow: 'hidden',
-    marginTop: 6,
-  },
-  progressFill: { height: 7, borderRadius: 4 },
-
-  statRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 12,
+  startStatusButton: {
+    borderRadius: 12,
+    backgroundColor: '#F97316',
+    borderColor: '#F97316',
+    borderWidth: 1,
+    paddingHorizontal: 12,
     paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
+    paddingBottom: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
   },
-  statBlock: { flex: 1, alignItems: 'center' },
-  statValue: { fontSize: 12.5, fontWeight: '800', color: '#1E293B' },
-  statLabel: { fontSize: 9.5, color: '#94A3B8', marginTop: 2 },
-  statDivider: { width: 1, height: 24, backgroundColor: '#F1F5F9' },
+  startStatusTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  startStatusMeta: {
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: 10.5,
+    fontWeight: '700',
+    marginTop: 3,
+    textAlign: 'center',
+  },
+  startStatusBaselineTrack: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+  },
+  startStatusBaselineFill: {
+    height: 4,
+    backgroundColor: '#fff',
+  },
+  runningStatusButton: {
+    backgroundColor: '#EA580C',
+    borderColor: '#EA580C',
+  },
+  completedStatusButton: {
+    backgroundColor: '#15803D',
+    borderColor: '#15803D',
+  },
 
   routeCardActions: {
     flexDirection: 'row',
@@ -4132,29 +4089,45 @@ const styles = StyleSheet.create({
   opsInfo: { flex: 1, marginLeft: 9 },
   opsTitle: { fontSize: 13, fontWeight: '800', color: '#1E293B' },
   opsSubtitle: { fontSize: 9.5, color: '#64748B', marginTop: 2, lineHeight: 13 },
-  opsEta: { fontSize: 12, fontWeight: '800', marginLeft: 8 },
-  opsEtaWrap: { alignItems: 'flex-end', marginLeft: 8 },
-  opsEtaLabel: { fontSize: 7.5, color: '#94A3B8', marginTop: 1 },
-  opsActions: { flexDirection: 'row', marginTop: 11 },
-  opsButton: {
-    flex: 1,
+
+  adminToolCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 11,
-    paddingVertical: 10,
+    gap: 11,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 10,
   },
-  opsButtonOutline: {
-    flex: 1,
-    flexDirection: 'row',
+  adminToolIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 11,
-    paddingVertical: 10,
-    marginLeft: 8,
-    backgroundColor: '#F8FAFC',
   },
-  opsButtonText: { color: '#fff', fontSize: 11, fontWeight: '800', marginLeft: 5 },
+  adminToolInfo: { flex: 1 },
+  adminToolTitle: { fontSize: 13, fontWeight: '800', color: '#1E293B' },
+  adminToolSubtitle: {
+    fontSize: 10.5,
+    color: '#64748B',
+    marginTop: 2,
+    lineHeight: 15,
+  },
+  adminNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    paddingHorizontal: 6,
+    paddingVertical: 10,
+  },
+  adminNoteText: {
+    flex: 1,
+    fontSize: 10.5,
+    color: '#64748B',
+    lineHeight: 15,
+  },
 
   mySpotRouteCard: {
     backgroundColor: '#fff',
@@ -4193,13 +4166,17 @@ const styles = StyleSheet.create({
   mySpotRoutePillText: { fontSize: 9.5, fontWeight: '800' },
   mySpotRouteStats: {
     flexDirection: 'row',
-    alignItems: 'center',
+    flexWrap: 'wrap',
     marginTop: 11,
     paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: '#F1F5F9',
   },
-  mySpotRouteStat: { flex: 1, alignItems: 'center' },
+  mySpotRouteStat: {
+    width: '33.33%',
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
   mySpotRouteValue: { fontSize: 13, fontWeight: '800', color: '#1E293B' },
   mySpotRouteStatLabel: { fontSize: 8.5, color: '#94A3B8', marginTop: 2 },
   mySpotCurrent: {
@@ -4228,12 +4205,43 @@ const styles = StyleSheet.create({
   },
   mySpotAddText: { color: '#fff', fontSize: 12, fontWeight: '800', marginLeft: 6 },
 
+  employeeProofCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 11,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 12,
+  },
+  employeeProofIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  employeeProofInfo: { flex: 1 },
+  employeeProofTitle: { fontSize: 13, fontWeight: '800', color: '#1E293B' },
+  employeeProofSubtitle: {
+    fontSize: 10.5,
+    color: '#64748B',
+    marginTop: 2,
+  },
+
   nextCard: {
     backgroundColor: '#fff',
     borderRadius: 18,
     padding: 14,
     borderWidth: 1,
     marginBottom: 12,
+  },
+  nextInline: {
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
   },
   nextHeader: { flexDirection: 'row', alignItems: 'center' },
   nextBadge: {
@@ -4250,6 +4258,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginLeft: 3,
   },
+  priorityNextBadge: { backgroundColor: '#D97706', marginLeft: 6 },
   nextCounter: { fontSize: 10.5, color: '#64748B', marginLeft: 8, fontWeight: '700' },
   nextEta: { fontSize: 10.5, fontWeight: '800', marginLeft: 'auto' },
   nextAddress: {
@@ -4360,64 +4369,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#B45309',
     marginLeft: 8,
-  },
-  daySummary: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    borderWidth: 1,
-    padding: 12,
-    marginBottom: 12,
-  },
-  daySummaryTop: { flexDirection: 'row', alignItems: 'center' },
-  daySummaryIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 9,
-  },
-  daySummaryTitleWrap: { flex: 1 },
-  daySummaryTitle: { fontSize: 12.5, fontWeight: '800', color: '#1E293B' },
-  daySummarySubtitle: { fontSize: 9.5, color: '#64748B', marginTop: 2 },
-  daySummaryLink: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  daySummaryLinkText: {
-    fontSize: 9.5,
-    fontWeight: '800',
-    marginLeft: 3,
-  },
-  daySummaryStats: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 11,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-  },
-  daySummaryStat: { flex: 1, alignItems: 'center' },
-  daySummaryValue: { fontSize: 13, fontWeight: '800', color: '#1E293B' },
-  daySummaryLabel: { fontSize: 8.5, color: '#94A3B8', marginTop: 2 },
-  daySummaryDivider: { width: 1, height: 22, backgroundColor: '#F1F5F9' },
-  daySummaryFooter: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 9,
-    paddingTop: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-  },
-  daySummaryFooterText: {
-    flex: 1,
-    fontSize: 9,
-    fontWeight: '700',
-    marginLeft: 5,
   },
 
   searchCard: {
@@ -4631,6 +4582,7 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     marginRight: 6,
   },
+  priorityChip: { backgroundColor: '#FEF3C7' },
   stopMetaText: { fontSize: 9, color: '#94A3B8', marginRight: 6, fontWeight: '600' },
   checkButton: { padding: 4 },
   menuButton: { padding: 4, marginLeft: 1 },
@@ -4892,6 +4844,13 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   startButtonText: { color: '#fff', fontWeight: '800', fontSize: 14 },
+  startSetupHint: {
+    fontSize: 10.5,
+    color: '#94A3B8',
+    lineHeight: 15,
+    marginTop: 4,
+    marginBottom: 2,
+  },
 
   detailAddress: { fontSize: 15, fontWeight: '800', color: '#1E293B' },
   detailMeta: { fontSize: 11, color: '#64748B', marginTop: 4 },
@@ -5010,6 +4969,27 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   detailStatusText: { fontSize: 12, color: '#475569', marginLeft: 6 },
+  detailPriority: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    backgroundColor: '#FFFBEB',
+    borderRadius: 11,
+    paddingVertical: 10,
+    marginTop: 10,
+  },
+  detailPriorityActive: {
+    backgroundColor: '#FEF3C7',
+    borderColor: '#F59E0B',
+  },
+  detailPriorityText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#B45309',
+    marginLeft: 6,
+  },
   detailActions: {
     flexDirection: 'row',
     alignItems: 'flex-start',

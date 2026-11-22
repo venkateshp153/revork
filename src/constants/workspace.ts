@@ -88,8 +88,9 @@ export const WORKSPACE_SHEETS: SheetDefinition[] = [
   {
     /**
      * The shared pool of delivery addresses plus the employee they were
-     * delivered by. Pending rows are assigned to employees in the app by
-     * matching each address to the closest employee "spot".
+     * delivered by. Pending rows use the assignment columns to record which
+     * employee's spot owns the address. Admin/manager "Optimize" writes the
+     * distribution so it survives reloads and every device sees the same plan.
      */
     title: 'DeliveryLocations',
     headers: [
@@ -107,6 +108,14 @@ export const WORKSPACE_SHEETS: SheetDefinition[] = [
       'WorkerName',
       'CreatedAt',
       'CreatedBy',
+      'AssignedWorkerID',
+      'AssignedWorkerName',
+      'AssignmentMode',
+      'AssignedAt',
+      'AssignedBy',
+      'UpdatedAt',
+      'UpdatedBy',
+      'Priority',
     ],
   },
   {
@@ -197,6 +206,21 @@ export const WORKSPACE_SHEETS: SheetDefinition[] = [
       ['officeStart', '09:00'],
       ['officeEnd', '17:00'],
       ['dailyWorkHours', '8'],
+    ],
+  },
+  {
+    title: 'Inventory',
+    headers: [
+      'ItemID',
+      'Category',
+      'ItemName',
+      'Quantity',
+      'LowStockAt',
+      'Notes',
+      'CreatedAt',
+      'CreatedBy',
+      'UpdatedAt',
+      'UpdatedBy',
     ],
   },
 ];

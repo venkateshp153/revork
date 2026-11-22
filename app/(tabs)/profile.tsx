@@ -47,6 +47,12 @@ export default function ProfileScreen() {
   const user = useSelector((state: RootState) => state.user);
 
   const [workers, setWorkers] = useState<SheetRow[]>([]);
+  const [sheetCompany, setSheetCompany] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    address: '',
+  });
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -97,8 +103,27 @@ export default function ProfileScreen() {
       return;
     }
     try {
-      const rows = await fetchSheetRows(sheetId, 'Workers');
+      const [rows, profileRows] = await Promise.all([
+        fetchSheetRows(sheetId, 'Workers'),
+        fetchSheetRows(sheetId, 'MyProfile').catch(() => [] as SheetRow[]),
+      ]);
       setWorkers(rows);
+      const companyRow =
+        profileRows.find(
+          (row) =>
+            !!row.CompanyName ||
+            !!row.CompanyPhone ||
+            !!row.CompanyEmail ||
+            !!row.CompanyAddress
+        ) || profileRows[0];
+      if (companyRow) {
+        setSheetCompany({
+          name: companyRow.CompanyName || '',
+          phone: companyRow.CompanyPhone || '',
+          email: companyRow.CompanyEmail || '',
+          address: companyRow.CompanyAddress || '',
+        });
+      }
     } catch (error) {
       console.error('Error loading profile row:', error);
     } finally {
@@ -479,22 +504,24 @@ export default function ProfileScreen() {
               <InfoRow
                 icon="office-building"
                 label="Company"
-                value={user.profile?.companyName || 'Not set'}
+                value={sheetCompany.name || user.profile?.companyName || 'Not set'}
               />
               <InfoRow
                 icon="phone"
                 label="Phone"
-                value={user.profile?.companyPhone || 'Not set'}
+                value={sheetCompany.phone || user.profile?.companyPhone || 'Not set'}
               />
               <InfoRow
                 icon="email"
                 label="Email"
-                value={user.profile?.companyEmail || 'Not set'}
+                value={sheetCompany.email || user.profile?.companyEmail || 'Not set'}
               />
               <InfoRow
                 icon="map-marker"
                 label="Address"
-                value={user.profile?.companyAddress || 'Not set'}
+                value={
+                  sheetCompany.address || user.profile?.companyAddress || 'Not set'
+                }
               />
             </>
           )}

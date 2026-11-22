@@ -33,6 +33,8 @@ import {
   getGoogleAccessToken,
   type SheetRow,
 } from '@/src/utils/sheets';
+import { sendAlert } from '@/src/utils/notifications';
+import { flushPendingMutations } from '@/src/services/sync';
 import {
   describeGoogleMapsError,
   distanceMeters,
@@ -51,8 +53,10 @@ import {
   formatDeliveryEta,
   addDeliveryLocations,
   loadDeliveryLocations,
+  removeDuplicateDeliveryLocations,
   saveWorkerSpot,
   workerSpotsFromRows,
+  type DeliveryActor,
   type DeliveryLocationRecord,
   type WorkerSpot,
 } from '@/src/utils/deliverySpots';
@@ -77,7 +81,6 @@ export default function DeliveryLocationsScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<LocationFilter>('all');
-  const [search, setSearch] = useState('');
 
   // Inline address search.
   const [query, setQuery] = useState('');
@@ -115,6 +118,11 @@ export default function DeliveryLocationsScreen() {
   const isManager = designation === 'manager';
   const canManage = isAdmin || isManager;
   const theme = getRoleTheme(designation, !canManage);
+  const actor: DeliveryActor = {
+    workerId: user.workerProfile?.workerId || myRow?.WorkerID || '',
+    name: user.name || myRow?.Name || 'Manager',
+    isManager,
+  };
 
   const spots = useMemo(() => workerSpotsFromRows(workers), [workers]);
   const distribution = useMemo(
@@ -164,6 +172,7 @@ export default function DeliveryLocationsScreen() {
     );
     return locations.filter((location) => {
       if (location.status === 'delivered') return false;
+      if (location.assignmentMode !== 'auto') return false;
       let bestDistance = distanceMeters(spotDraft, location);
       otherSpots.forEach((plan) => {
         const distance = distanceMeters(plan.worker.spot!, location);
@@ -248,9 +257,26 @@ export default function DeliveryLocationsScreen() {
     }, [refresh])
   );
 
+  // Managers clean duplicate address rows from the shared sheet once loaded.
+  useEffect(() => {
+    if (!sheetId || !canManage) return;
+    let alive = true;
+    (async () => {
+      const removed = await removeDuplicateDeliveryLocations(sheetId);
+      if (alive && removed > 0) {
+        await refresh();
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [sheetId, canManage, refresh]);
+
   const visibleLocations = useMemo(() => {
     if (canManage) return locations;
     if (!myPlan) return [];
+    // Employees only ever see the pending locations assigned to them (whether
+    // auto, optimized or manual) plus the ones they delivered themselves.
     const ids = new Set<string>([
       ...myPlan.pending.map((location) => location.id),
       ...myPlan.delivered.map((location) => location.id),
@@ -259,30 +285,12 @@ export default function DeliveryLocationsScreen() {
   }, [canManage, locations, myPlan]);
 
   const filteredLocations = useMemo(() => {
-    const text = search.trim().toLowerCase();
     return visibleLocations.filter((location) => {
       if (filter === 'pending' && location.status === 'delivered') return false;
       if (filter === 'delivered' && location.status !== 'delivered') return false;
-      if (
-        text &&
-        !`${location.address} ${location.contactName} ${location.phone} ${
-          location.workerName
-        }`
-          .toLowerCase()
-          .includes(text)
-      ) {
-        return false;
-      }
       return true;
     });
-  }, [visibleLocations, filter, search]);
-
-  const visiblePending = canManage
-    ? distribution.pendingTotal
-    : myPlan?.pending.length || 0;
-  const visibleDelivered = canManage
-    ? distribution.deliveredTotal
-    : myPlan?.delivered.length || 0;
+  }, [visibleLocations, filter]);
 
   // ------------------------------------------------------------ address search
   const addLocation = async (location: RouteLocation) => {
@@ -303,11 +311,15 @@ export default function DeliveryLocationsScreen() {
           lng: location.lng,
         },
       ],
-      user.name || user.email || 'Admin'
+      user.name || user.email || 'Admin',
+      actor,
+      spots
     );
     if (added === 0) {
       throw new Error('Could not save that address.');
     }
+    // Write to the sheet immediately instead of leaving it in the sync queue.
+    await flushPendingMutations(true);
     setQuery('');
     setSuggestions([]);
     setSearchError('');
@@ -361,7 +373,7 @@ export default function DeliveryLocationsScreen() {
   // ------------------------------------------------------------ removal
   const performRemove = async (location: DeliveryLocationRecord) => {
     try {
-      await deleteDeliveryLocation(sheetId, location);
+      await deleteDeliveryLocation(sheetId, location, actor);
       await refresh();
     } catch (error: any) {
       Alert.alert(
@@ -421,14 +433,28 @@ export default function DeliveryLocationsScreen() {
         { workerId: spotWorker.workerId, email: spotWorker.email },
         clear ? null : spotDraft
       );
+      if (isManager) {
+        void sendAlert({
+          sheetId,
+          token,
+          target: 'admin',
+          title: 'Delivery spot changed by manager',
+          body: `${actor.name || 'A manager'} ${
+            clear ? 'removed' : 'changed'
+          } the delivery spot for ${spotWorker.name}.`,
+          durationHours: 0,
+          fromUid: actor.workerId || actor.name || 'manager',
+          type: 'delivery_audit',
+        }).catch(() => {});
+      }
       setSpotWorker(null);
       setSpotDraft(null);
       await refresh();
       Alert.alert(
         clear ? 'Spot cleared' : 'Spot saved',
         clear
-          ? `${spotWorker.name} will no longer receive automatic deliveries.`
-          : `Deliveries closest to this spot will be assigned to ${spotWorker.name}.`
+          ? `${spotWorker.name} will no longer receive automatic deliveries. Any saved assignment to them will show as unassigned.`
+          : `New addresses closest to this spot will be linked to ${spotWorker.name}. Use Optimize in Route to redistribute saved deliveries.`
       );
     } catch (error: any) {
       Alert.alert(
@@ -464,7 +490,7 @@ export default function DeliveryLocationsScreen() {
             Delivery spots
           </Text>
           <Text style={[styles.subtitle, { color: theme.headerMuted }]}>
-            Addresses are shared; each employee gets the closest ones
+            Employee spots and the shared delivery location list
           </Text>
         </View>
         <TouchableOpacity
@@ -508,34 +534,6 @@ export default function DeliveryLocationsScreen() {
           contentContainerStyle={styles.content}
           showsVerticalScrollIndicator={false}
         >
-          <View style={styles.statsCard}>
-            <View style={styles.statBlock}>
-              <Text style={styles.statValue}>{visibleLocations.length}</Text>
-              <Text style={styles.statLabel}>Total</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statBlock}>
-              <Text style={styles.statValue}>{visiblePending}</Text>
-              <Text style={styles.statLabel}>Pending</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statBlock}>
-              <Text style={styles.statValue}>{visibleDelivered}</Text>
-              <Text style={styles.statLabel}>Delivered</Text>
-            </View>
-            <View style={styles.statDivider} />
-            <View style={styles.statBlock}>
-              <Text style={styles.statValue}>
-                {canManage
-                  ? distribution.spotsSet
-                  : myPlan?.ordersPending || 0}
-              </Text>
-              <Text style={styles.statLabel}>
-                {canManage ? 'Spots' : 'Orders left'}
-              </Text>
-            </View>
-          </View>
-
           {!canManage && !myPlan?.worker.spot && (
             <View style={styles.emptyCard}>
               <MaterialCommunityIcons
@@ -812,8 +810,7 @@ export default function DeliveryLocationsScreen() {
               />
               <Text style={styles.warningText}>
                 {distribution.unassigned.length} pending address
-                {distribution.unassigned.length === 1 ? '' : 'es'} cannot be
-                assigned because no employee has a spot yet.
+                {distribution.unassigned.length === 1 ? '' : 'es'} {distribution.unassigned.length === 1 ? 'is' : 'are'} not assigned to an employee. Set a spot or assign {distribution.unassigned.length === 1 ? 'it' : 'them'} from Delivery control.
               </Text>
             </View>
           )}
@@ -824,7 +821,9 @@ export default function DeliveryLocationsScreen() {
                 {canManage ? 'Delivery locations' : 'My delivery locations'}
               </Text>
               <Text style={styles.sectionSubtitle}>
-                {visiblePending} pending · {visibleDelivered} delivered
+                {canManage
+                  ? 'Shared with the whole team'
+                  : 'Only deliveries assigned to you are shown'}
               </Text>
             </View>
           </View>
@@ -832,12 +831,9 @@ export default function DeliveryLocationsScreen() {
           <View style={styles.filterRow}>
             {(
               [
-                { key: 'all', label: `All ${visibleLocations.length}` },
-                { key: 'pending', label: `Pending ${visiblePending}` },
-                {
-                  key: 'delivered',
-                  label: `Done ${visibleDelivered}`,
-                },
+                { key: 'all', label: 'All' },
+                { key: 'pending', label: 'Pending' },
+                { key: 'delivered', label: 'Done' },
               ] as { key: LocationFilter; label: string }[]
             ).map((item) => {
               const active = filter === item.key;
@@ -864,26 +860,6 @@ export default function DeliveryLocationsScreen() {
                 </TouchableOpacity>
               );
             })}
-          </View>
-
-          <View style={styles.searchRow}>
-            <MaterialCommunityIcons name="magnify" size={16} color="#64748B" />
-            <TextInput
-              style={styles.searchInput}
-              value={search}
-              onChangeText={setSearch}
-              placeholder="Find an address, person or phone"
-              placeholderTextColor="#94A3B8"
-            />
-            {!!search && (
-              <TouchableOpacity onPress={() => setSearch('')}>
-                <MaterialCommunityIcons
-                  name="close-circle"
-                  size={16}
-                  color="#94A3B8"
-                />
-              </TouchableOpacity>
-            )}
           </View>
 
           {filteredLocations.length === 0 ? (
@@ -989,7 +965,15 @@ export default function DeliveryLocationsScreen() {
                                           assignment.etaMinutes
                                         )}`
                                       : ''
+                                  }${
+                                    location.assignmentMode === 'manual'
+                                      ? ' · manual'
+                                      : location.assignmentMode === 'optimized'
+                                      ? ' · optimized'
+                                      : ''
                                   }`
+                                : location.assignmentMode === 'unassigned'
+                                ? 'Removed from every plan'
                                 : 'Waiting for a spot'}
                             </Text>
                           </View>
@@ -1040,9 +1024,8 @@ export default function DeliveryLocationsScreen() {
               color="#94A3B8"
             />
             <Text style={styles.footerNoteText}>
-              Pending addresses are auto-assigned to the employee whose spot is
-              nearest. Change a spot any time and the list re-balances
-              automatically.
+              New addresses follow the closest employee spot automatically.
+              Assignments can be changed from the Route tab.
             </Text>
           </View>
         </ScrollView>
@@ -1118,8 +1101,8 @@ export default function DeliveryLocationsScreen() {
               <View style={styles.modalHeaderText}>
                 <Text style={styles.modalTitle}>Delivery spot</Text>
                 <Text style={styles.modalSubtitle}>
-                  {spotWorker?.name} receives the addresses closest to this
-                  point.
+                  {spotWorker?.name} gets new auto addresses closest to this
+                  point. Optimize redistributes the saved plan.
                 </Text>
               </View>
               <TouchableOpacity onPress={closeSpotEditor} disabled={spotSaving}>
@@ -1145,9 +1128,9 @@ export default function DeliveryLocationsScreen() {
               <Text style={styles.spotSummaryText}>
                 {spotWorker
                   ? spotDraft
-                    ? `${spotPreviewCount} pending address${
+                    ? `${spotPreviewCount} new/auto address${
                         spotPreviewCount === 1 ? '' : 'es'
-                      } would be sent to ${spotWorker.name} from this spot.`
+                      } would be linked to ${spotWorker.name} from this spot.`
                     : `${spotWorker.name} will not receive auto-assigned deliveries.`
                   : ''}
               </Text>
@@ -1225,16 +1208,6 @@ const styles = StyleSheet.create({
   },
   loadingText: { marginTop: 10, fontSize: 12, color: '#64748B' },
 
-  statsCard: {
-    flexDirection: 'row',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    paddingVertical: 14,
-    marginBottom: 14,
-  },
-  statBlock: { flex: 1, alignItems: 'center' },
-  statValue: { fontSize: 17, fontWeight: '800', color: '#1E293B' },
-  statLabel: { fontSize: 9.5, color: '#94A3B8', marginTop: 2 },
   statDivider: { width: 1, height: 28, backgroundColor: '#F1F5F9' },
 
   actionRow: { flexDirection: 'row', marginBottom: 8 },
@@ -1446,24 +1419,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   filterChipText: { fontSize: 10, fontWeight: '700', color: '#64748B' },
-
-  searchRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    paddingHorizontal: 10,
-    marginBottom: 10,
-  },
-  searchInput: {
-    flex: 1,
-    paddingVertical: 9,
-    paddingHorizontal: 6,
-    fontSize: 12,
-    color: '#1E293B',
-  },
 
   emptyCard: {
     alignItems: 'center',

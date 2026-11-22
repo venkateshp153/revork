@@ -66,7 +66,9 @@
           "photosPermission": "Allow Revork to attach delivery proof photos and scan address lists from your gallery.",
           "cameraPermission": "Allow Revork to take delivery proof photos and scan address lists."
         }
-      ]
+      ],
+      "expo-font",
+      "expo-router"
     ],
     "experiments": {
       "typedRoutes": true

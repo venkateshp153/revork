@@ -9,6 +9,7 @@ import { ensureDeliveriesSheet } from '@/src/utils/deliveryLog';
 import { ensureDeliveryLocationsSheet } from '@/src/utils/deliverySpots';
 import { ensureShiftsSheet } from '@/src/utils/scheduling';
 import { ensurePayrollSheet } from '@/src/utils/payroll';
+import { ensureInventorySheet } from '@/src/utils/inventory';
 import {
   applyMutationsToGrid,
   getPendingMutations,
@@ -179,6 +180,17 @@ export async function flushPendingMutations(
   if (firstPayroll) {
     try {
       await ensurePayrollSheet(firstPayroll.sheetId, token);
+    } catch {
+      // The append below will report the real error if the tab is missing.
+    }
+  }
+
+  const firstInventory = queue.find(
+    (mutation) => mutation.sheetName === 'Inventory'
+  );
+  if (firstInventory) {
+    try {
+      await ensureInventorySheet(firstInventory.sheetId, token);
     } catch {
       // The append below will report the real error if the tab is missing.
     }
