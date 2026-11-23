@@ -100,6 +100,10 @@ import {
   type DeliveryLocationRecord,
 } from '@/src/utils/deliverySpots';
 import { flushPendingMutations } from '@/src/services/sync';
+import {
+  openPhoneNumber,
+  sanitizePhoneNumber,
+} from '@/src/utils/safeUrl';
 
 function stopId(): string {
   return `stop_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1782,17 +1786,15 @@ export default function RouteScreen() {
   };
 
   const callStopContact = async (stop: RouteStop) => {
-    const cleaned = (stop.phone || '').replace(/[^\d+]/g, '');
-    if (!cleaned) {
+    if (!sanitizePhoneNumber(stop.phone)) {
       Alert.alert(
         'No phone number',
         'Add the customer’s phone number in the contact section first.'
       );
       return;
     }
-    try {
-      await Linking.openURL(`tel:${cleaned}`);
-    } catch {
+    const opened = await openPhoneNumber(stop.phone);
+    if (!opened) {
       Alert.alert('Could not open the dialer', 'Try calling manually.');
     }
   };

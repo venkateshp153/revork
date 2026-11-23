@@ -13,7 +13,10 @@ import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getFirestore, doc, getDoc, setDoc, collection, addDoc, query, where, getDocs, updateDoc } from 'firebase/firestore';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
-import { configureGoogleSignin } from '@/src/services/googleAuth';
+import {
+  clearCachedAccessToken,
+  configureGoogleSignin,
+} from '@/src/services/googleAuth';
 import { describeDriveLocation } from '@/src/utils/drivePaths';
 import type { Persistence } from '@firebase/auth';
 
@@ -394,7 +397,10 @@ export const updateCompanyTracking = async (companyId: string, userId: string, c
   try {
     console.log('[AuthDebug] updateCompanyTracking → companyId:', companyId, '| companyName:', companyName);
     const companiesRef = collection(db, 'company_tracking');
-    const q = query(companiesRef, where('companyId', '==', companyId));
+    // Query on ownerId (not companyId) so Firestore can prove the read rule for
+    // `resource.data.ownerId == request.auth.uid`; a companyId-only query is
+    // rejected even when every matching document belongs to the caller.
+    const q = query(companiesRef, where('ownerId', '==', userId));
     const querySnapshot = await getDocs(q);
     
     if (querySnapshot.empty) {
@@ -642,6 +648,7 @@ export const getAllCompanies = async () => {
 
 export const signOutUser = async () => {
   let googleOk = true;
+  clearCachedAccessToken();
   console.log('[AuthDebug 17b] signOutUser → Google sign out…');
   try {
     await GoogleSignin.signOut();
@@ -661,6 +668,18 @@ export const signOutUser = async () => {
     console.error('[AuthDebug 17b] Firebase sign out FAILED:', error);
     return { success: false, error: 'Sign out failed' };
   }
+
+  // Wipe everything this account cached on the device (sheet snapshots with
+  // names/phones/pay, saved routes, delivery proof queue, offline mutations).
+  // Without this, a shared or resold phone would keep a previous employee's
+  // workspace data after logout.
+  try {
+    await AsyncStorage.clear();
+    console.log('[AuthDebug 17b] Local workspace cache cleared ✔');
+  } catch (error) {
+    console.warn('[AuthDebug 17b] Could not clear local cache:', error);
+  }
+
   return { success: true, googleOk };
 };
 

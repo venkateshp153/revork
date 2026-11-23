@@ -12,6 +12,24 @@ const GOOGLE_SCOPES = [
 let configured = false;
 
 /**
+ * Access tokens are valid for ~1 hour. Caching them avoids a native round-trip
+ * on every sheet read and, more importantly, keeps the app on the authenticated
+ * path instead of falling back to the public API key.
+ */
+let cachedAccessToken: { value: string; expiresAt: number } | null = null;
+const TOKEN_CACHE_MS = 50 * 60 * 1000;
+
+/** Drops the cached token (call on sign-out or when Google rejects a token). */
+export function clearCachedAccessToken(): void {
+  cachedAccessToken = null;
+}
+
+function rememberToken(token: string): string {
+  cachedAccessToken = { value: token, expiresAt: Date.now() + TOKEN_CACHE_MS };
+  return token;
+}
+
+/**
  * Configures the native Google Sign-In module once per JS runtime.
  *
  * This used to live only inside `firebaseService`, which meant a cold start
@@ -69,15 +87,23 @@ export async function getGoogleAccessToken(
 ): Promise<string | null> {
   configureGoogleSignin();
 
-  const silent = await getAccessTokenWithRetry(2, 150);
-  if (silent) return silent;
+  if (!interactive && cachedAccessToken && Date.now() < cachedAccessToken.expiresAt) {
+    return cachedAccessToken.value;
+  }
 
-  if (!interactive) return null;
+  const silent = await getAccessTokenWithRetry(2, 150);
+  if (silent) return rememberToken(silent);
+
+  if (!interactive) {
+    clearCachedAccessToken();
+    return null;
+  }
 
   try {
     await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
     await GoogleSignin.signIn();
-    return await getAccessTokenWithRetry(6, 250);
+    const token = await getAccessTokenWithRetry(6, 250);
+    return token ? rememberToken(token) : null;
   } catch {
     return null;
   }
@@ -136,6 +162,7 @@ export async function resolveGoogleEmail(
 /** Clears the current Google session so the next sign-in shows the account picker. */
 export async function clearGoogleSession(): Promise<void> {
   configureGoogleSignin();
+  clearCachedAccessToken();
   try {
     await GoogleSignin.signOut();
     console.log('[GoogleAuth] Google session cleared');
@@ -155,6 +182,7 @@ export async function signInWithGoogleWorkspace(): Promise<{
   scopes: string[];
 } | null> {
   configureGoogleSignin();
+  clearCachedAccessToken();
   try {
     try {
       await GoogleSignin.signOut();
@@ -170,6 +198,7 @@ export async function signInWithGoogleWorkspace(): Promise<{
       result.data?.user?.email ||
       (await resolveGoogleEmail(accessToken)) ||
       '';
+    rememberToken(accessToken);
     console.log('[GoogleAuth] Workspace sign-in:', email, '| scopes:', scopes);
     return { accessToken, email, scopes };
   } catch (error) {

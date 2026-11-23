@@ -3,9 +3,12 @@ node_modules/
 *.log
 .DS_Store
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
+*.aab
+*.apk
 *.mobileprovision
 *.orig.*
 web-build/

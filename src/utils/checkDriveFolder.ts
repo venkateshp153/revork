@@ -7,7 +7,9 @@ import axios from 'axios';
  */
 export async function findFolderByName(accessToken: string, folderName: string) {
   try {
-    const escapedName = folderName.replace(/'/g, "\\'");
+    // A company name is user input. Strip backslashes and escape single quotes
+    // so it cannot break out of the Drive query string.
+    const escapedName = folderName.replace(/\\/g, '').replace(/'/g, "\\'");
     const response = await axios.get(
       'https://www.googleapis.com/drive/v3/files',
       {

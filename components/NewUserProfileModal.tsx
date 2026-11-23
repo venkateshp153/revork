@@ -19,7 +19,7 @@ import { GoogleSignin } from '@react-native-google-signin/google-signin';
 import { ensureCompanyWorkspace } from '@/src/utils/workspace';
 import { signOutUser, completeUserOnboarding, auth } from '@/assets/services/firebaseService';
 import { ensureAdminWorkerRow } from '@/src/utils/workerManagement';
-import { ensurePublicReadAccess, updateSheetRange } from '@/src/utils/sheets';
+import { updateSheetRange } from '@/src/utils/sheets';
 
 interface NewUserProfileModalProps {
   visible: boolean;
@@ -31,7 +31,7 @@ interface NewUserProfileModalProps {
 
 export default function NewUserProfileModal({ visible, preFillData }: NewUserProfileModalProps) {
   const [name, setName] = useState(preFillData?.name || '');
-  const [email, setEmail] = useState(preFillData?.email || '');
+  const [email] = useState(preFillData?.email || '');
   const [companyName, setCompanyName] = useState('');
   const [companyAddress, setCompanyAddress] = useState('');
   const [companyPhone, setCompanyPhone] = useState('');
@@ -107,16 +107,9 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
         accessToken: tokens.accessToken,
       });
 
-      const publicRead = await ensurePublicReadAccess(
-        result.sheetId,
-        tokens.accessToken
-      );
-      if (!publicRead) {
-        Alert.alert(
-          'Sharing warning',
-          'The workspace was created, but Google did not allow "Anyone with the link" sharing. Workers can still join by signing in with the Google email you add for them. You can retry sharing from Workers → share icon.'
-        );
-      }
+      // The workspace is private by default. Workers get access with their own
+      // Google account when the admin adds them (Workers → share), so the
+      // company sheet is never exposed as "anyone with the link".
 
       // 2. Save the account + workspace ids to Firestore. This is the moment a
       //    new admin actually gets created in `users/{uid}` (sign-in only
@@ -284,17 +277,21 @@ export default function NewUserProfileModal({ visible, preFillData }: NewUserPro
                 <Text style={styles.errorText}>{validationErrors.name}</Text>
               )}
 
-              <Text style={styles.label}>Email *</Text>
+              <Text style={styles.label}>Email (Google account)</Text>
               <TextInput
-                style={[styles.input, validationErrors.email && styles.inputError]}
+                style={[styles.input, styles.inputDisabled]}
                 placeholder="Your email"
                 value={email}
-                onChangeText={setEmail}
+                editable={false}
                 placeholderTextColor="#999"
                 keyboardType="email-address"
                 autoCapitalize="none"
                 autoCorrect={false}
               />
+              <Text style={styles.helperText}>
+                This is the verified email you signed in with and cannot be
+                changed here.
+              </Text>
               {validationErrors.email && (
                 <Text style={styles.errorText}>{validationErrors.email}</Text>
               )}
@@ -440,6 +437,15 @@ const styles = StyleSheet.create({
   },
   inputError: {
     borderColor: '#F44336',
+  },
+  inputDisabled: {
+    backgroundColor: '#EEF2F7',
+    color: '#64748B',
+  },
+  helperText: {
+    color: '#64748B',
+    fontSize: 11,
+    marginTop: 5,
   },
   errorText: {
     color: '#F44336',

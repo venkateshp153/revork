@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<!--
+  Revork privacy policy — ready to host as a static page.
+
+  BEFORE PUBLISHING: replace every occurrence of
+    support@revork.app  -> your real, monitored support mailbox
+    Revork              -> your legal company/developer name (footer only)
+  Then upload this file to any static host (GitHub Pages, Netlify,
+  Cloudflare Pages) and put the HTTPS URL in:
+    - EXPO_PUBLIC_PRIVACY_URL
+    - Google Play Console -> Store presence -> Privacy policy
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="index, follow" />
+  <title>Privacy Policy · Revork</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #e2e8f0;
+      --accent: #047857;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1220;
+        --card: #111b2e;
+        --text: #e6edf7;
+        --muted: #9fb0c7;
+        --line: #223049;
+        --accent: #34d399;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        Helvetica, Arial, sans-serif;
+    }
+    main {
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 40px 20px 72px;
+    }
+    header { margin-bottom: 28px; }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      font-size: 20px;
+      color: var(--accent);
+    }
+    .brand svg { width: 26px; height: 26px; }
+    h1 {
+      font-size: clamp(28px, 5vw, 38px);
+      line-height: 1.15;
+      letter-spacing: -0.03em;
+      margin: 18px 0 8px;
+    }
+    .updated { color: var(--muted); font-size: 14px; margin: 0; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 24px 22px;
+      margin-top: 22px;
+    }
+    h2 {
+      font-size: 18px;
+      letter-spacing: -0.01em;
+      margin: 0 0 10px;
+    }
+    h3 {
+      font-size: 15px;
+      margin: 18px 0 6px;
+      color: var(--accent);
+    }
+    p, li { color: var(--muted); }
+    p { margin: 0 0 10px; }
+    ul { margin: 0 0 10px; padding-left: 20px; }
+    li { margin-bottom: 4px; }
+    a { color: var(--accent); }
+    .notice {
+      border-left: 3px solid var(--accent);
+      padding: 10px 14px;
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      margin: 16px 0 0;
+    }
+    footer {
+      margin-top: 28px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="5" stroke="currentColor" stroke-width="2"/>
+          <path d="M7 12.5 10.2 16 17 8.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Revork
+      </div>
+      <h1>Privacy Policy</h1>
+      <p class="updated">Last updated: 23 November 2026</p>
+    </header>
+
+    <div class="card">
+      <p>
+        Revork is a workforce and delivery management app used by companies and
+        their employees. This policy explains what data the app collects, why,
+        and how it is handled.
+      </p>
+
+      <h2>Data we collect</h2>
+      <ul>
+        <li><strong>Account data:</strong> name, email address, profile photo, phone number and role.</li>
+        <li><strong>Company data:</strong> company name, address, phone, email and workspace files.</li>
+        <li><strong>Delivery data:</strong> delivery addresses, receiver names and phone numbers, order counts, delivery status, notes and delivery proof photos.</li>
+        <li><strong>Location data:</strong> approximate or precise device location while the app is in use, used to build routes, find the next stop and record proof check-in.</li>
+        <li><strong>Attendance and payroll data:</strong> clock-in/out times, worked hours and pay rates entered by the company.</li>
+        <li><strong>Inventory data:</strong> item names, categories, quantities, low-stock levels and notes.</li>
+      </ul>
+      <p>We do not sell personal data.</p>
+
+      <h2>How data is used</h2>
+      <ul>
+        <li>To sign users in and connect them to their company workspace.</li>
+        <li>To build, optimize and track delivery routes.</li>
+        <li>To record deliveries, proof photos and attendance.</li>
+        <li>To show company, team and inventory information inside the app.</li>
+        <li>To send in-app alerts and notifications.</li>
+        <li>To keep the service secure and troubleshoot failures.</li>
+      </ul>
+
+      <h2>Where data is stored</h2>
+      <p>
+        Company workspace data is stored in the company's Google Sheets and
+        Google Drive folder. Account and tracking data may be stored in Google
+        Firebase. Device permissions and local files are used for photos and
+        offline support.
+      </p>
+      <p>
+        Workspace spreadsheets are private. They are shared only with the Google
+        accounts the company authorizes; they are not public link-shared.
+      </p>
+      <p>
+        Google's privacy policy applies to Google services:
+        <a href="https://policies.google.com/privacy" rel="noopener noreferrer">
+          https://policies.google.com/privacy
+        </a>
+      </p>
+
+      <h2>Sharing</h2>
+      <p>
+        Data is visible to the company that owns the workspace and to users the
+        company authorizes. We do not share personal data with advertisers or
+        unrelated third parties. Service providers such as Google Cloud,
+        Firebase, Google Sheets/Drive, Google Maps and Google Cloud Vision
+        process data to provide the service.
+      </p>
+
+      <h2>Retention and deletion</h2>
+      <p>
+        Company workspace data is retained for as long as the company keeps it.
+        Users can delete their personal account from
+        <strong>Profile → Privacy &amp; account → Delete my account</strong>.
+        Account deletion removes the personal profile and sign-in. Company
+        workspace files belong to the company and are not deleted by an employee
+        account deletion.
+      </p>
+      <p>
+        To request deletion of company data, contact the company administrator
+        or
+        <a href="mailto:support@revork.app">support@revork.app</a>.
+      </p>
+      <div class="notice">
+        <strong>Data deletion request:</strong> email
+        <a href="mailto:support@revork.app">support@revork.app</a> with the
+        subject "Data deletion request" and the Google account email used with
+        Revork. We respond within 30 days.
+      </div>
+
+      <h2>Security</h2>
+      <p>
+        Data is transmitted over HTTPS. Access to a workspace is limited by
+        Google account permissions and app roles. No method of transmission or
+        storage is completely secure, but we take reasonable measures to protect
+        data.
+      </p>
+
+      <h2>Children</h2>
+      <p>Revork is a workplace app and is not directed to children under 13.</p>
+
+      <h2>Changes</h2>
+      <p>
+        We may update this policy. The updated date is shown at the top of this
+        page.
+      </p>
+
+      <h2>Contact</h2>
+      <p>
+        Revork<br />
+        <a href="mailto:support@revork.app">support@revork.app</a>
+      </p>
+    </div>
+
+    <footer>© 2026 Revork. All rights reserved.</footer>
+  </main>
+</body>
+</html>

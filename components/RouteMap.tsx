@@ -29,6 +29,9 @@ export default function RouteMap({
   onStopPress,
 }: RouteMapProps) {
   const html = useMemo(() => {
+    const safeAccent = /^#[0-9a-fA-F]{3,8}$/.test(accent)
+      ? accent
+      : '#2563EB';
     const data = {
       path,
       stops: stops.map((stop) => ({
@@ -44,14 +47,15 @@ export default function RouteMap({
       current: currentLocation
         ? { lat: currentLocation.lat, lng: currentLocation.lng }
         : null,
-      accent,
+      accent: safeAccent,
     };
 
     return `<!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline' https://unpkg.com; script-src 'unsafe-inline' https://unpkg.com; connect-src https://*.tile.openstreetmap.org https://unpkg.com; font-src https://unpkg.com;" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
 <style>
   html, body, #map { height: 100%; margin: 0; background: #F1F5F9; }
   .pin {
@@ -68,7 +72,7 @@ export default function RouteMap({
 </head>
 <body>
 <div id="map"></div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
 <script>
 const data = ${safeJson(data)};
 const map = L.map('map', { zoomControl: true, attributionControl: false });
@@ -166,12 +170,28 @@ if (points.length > 0) {
         source={{ html }}
         style={styles.webview}
         javaScriptEnabled
-        domStorageEnabled
+        domStorageEnabled={false}
+        javaScriptCanOpenWindowsAutomatically={false}
+        setSupportMultipleWindows={false}
+        allowFileAccess={false}
+        allowFileAccessFromFileURLs={false}
+        allowUniversalAccessFromFileURLs={false}
+        mixedContentMode="never"
         scrollEnabled={false}
+        onShouldStartLoadWithRequest={(request) =>
+          request.url === 'about:blank' ||
+          request.url.startsWith('data:text/html') ||
+          request.url.startsWith('about:')
+        }
         onMessage={(event) => {
           try {
             const message = JSON.parse(event.nativeEvent.data);
-            if (message?.type === 'stop' && typeof message.index === 'number') {
+            if (
+              message?.type === 'stop' &&
+              typeof message.index === 'number' &&
+              message.index >= 0 &&
+              message.index < stops.length
+            ) {
               onStopPress?.(message.index);
             }
           } catch {

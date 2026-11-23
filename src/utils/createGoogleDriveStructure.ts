@@ -161,27 +161,9 @@ export async function createGoogleDriveStructure(
       }
     }
 
-    try {
-      await axios.post(
-        `https://www.googleapis.com/drive/v3/files/${sheetId}/permissions`,
-        {
-          type: 'anyone',
-          role: 'reader',
-        },
-        {
-          headers: authHeaders,
-          params: { sendNotificationEmail: false },
-        }
-      );
-      console.log('Reader permission granted (anyone with link)');
-    } catch (permissionError: any) {
-      // Org policies can block link sharing. Employees can still be granted
-      // per-account access when the admin shares their worker link.
-      console.warn(
-        'Could not enable link sharing on the spreadsheet:',
-        permissionError?.response?.data?.error?.message || permissionError?.message
-      );
-    }
+    // The spreadsheet stays private. Employees are granted access one by one
+    // with their own Google account (see workerManagement.ts) when the admin
+    // adds them, so the workspace is never readable by "anyone with the link".
 
     const joinLink = `revork://login?sheetId=${encodeURIComponent(
       sheetId

@@ -1,179 +1,233 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper function to check if user is admin
+
+    // ---------------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Google sign-in marks the email as verified. Require it for writes that
+    // bind an account to an email address.
+    function hasVerifiedEmail() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isSelf(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.designation;
+    }
+
+    // A company admin is the owner of their own workspace. This is NOT a
+    // platform-wide role: every self-onboarded company admin is one, so it must
+    // never be used to read another company's records.
     function isAdmin() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.designation == 'admin';
+      return isSignedIn() && userRole() == 'admin';
     }
-    
-    // ============================================
-    // USER TRACKING COLLECTION
-    // ============================================
+
+    function isManagerOrAdmin() {
+      return isSignedIn() && (userRole() == 'admin' || userRole() == 'manager');
+    }
+
+    // Reserved for a trusted operator (support/platform tooling). Set this as a
+    // custom claim with the Admin SDK; it can never be granted from the client.
+    function isPlatformAdmin() {
+      return isSignedIn() && request.auth.token.platformAdmin == true;
+    }
+
+    // Worker/company records must belong to the signed-in admin's own company.
+    function ownsCompanyId(companyId) {
+      return isSignedIn() &&
+             (companyId == request.auth.uid ||
+              companyId == 'company_' + request.auth.uid);
+    }
+
+    function sameCompany(companyId) {
+      return isAdmin() && ownsCompanyId(companyId);
+    }
+
+    // ---------------------------------------------------------------------
+    // USER TRACKING (analytics mirror)
+    // ---------------------------------------------------------------------
     match /user_tracking/{userId} {
-      // Users can read their own data
-      allow read: if request.auth != null && request.auth.uid == userId;
-      
-      // Admins can read all user tracking data
-      allow read: if request.auth != null && isAdmin();
-      
-      // Users can create/update their own tracking data
-      allow create: if request.auth != null && request.auth.uid == userId;
-      allow update: if request.auth != null && request.auth.uid == userId;
-      
-      // Admins can update any user tracking data
-      allow update: if request.auth != null && isAdmin();
+      // Self, same-company admins, or a platform admin. Never every admin.
+      allow read: if isSelf(userId) ||
+                     isPlatformAdmin() ||
+                     (isSignedIn() && sameCompany(resource.data.companyId));
+
+      allow create: if isSelf(userId) &&
+                       hasVerifiedEmail() &&
+                       request.resource.data.uid == userId &&
+                       request.resource.data.email == request.auth.token.email;
+
+      allow update: if isSelf(userId) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.email == resource.data.email;
+
+      allow delete: if isSelf(userId) || isPlatformAdmin();
     }
-    
-    // ============================================
-    // WORKER TRACKING COLLECTION
-    // ============================================
+
+    // ---------------------------------------------------------------------
+    // WORKER TRACKING
+    // ---------------------------------------------------------------------
     match /worker_tracking/{document} {
-      // Any authenticated user can read worker data
-      allow read: if request.auth != null;
-      
-      // Only admins can create/update worker tracking
-      allow create: if request.auth != null && isAdmin();
-      allow update: if request.auth != null && isAdmin();
-      allow delete: if request.auth != null && isAdmin();
+      allow read: if isSignedIn() &&
+                     (resource.data.email == request.auth.token.email ||
+                      isPlatformAdmin() ||
+                      sameCompany(resource.data.companyId));
+
+      allow create: if isSignedIn() &&
+                       isAdmin() &&
+                       ownsCompanyId(request.resource.data.companyId);
+
+      allow update: if isSignedIn() &&
+                       isAdmin() &&
+                       ownsCompanyId(resource.data.companyId) &&
+                       request.resource.data.companyId == resource.data.companyId;
+
+      allow delete: if isSignedIn() &&
+                       ((isAdmin() && ownsCompanyId(resource.data.companyId)) ||
+                        resource.data.email == request.auth.token.email ||
+                        isPlatformAdmin());
     }
-    
-    // ============================================
-    // COMPANY TRACKING COLLECTION
-    // ============================================
+
+    // ---------------------------------------------------------------------
+    // COMPANY TRACKING
+    // ---------------------------------------------------------------------
     match /company_tracking/{document} {
-      // Any authenticated user can read company data
-      allow read: if request.auth != null;
-      
-      // Only company owners can create their company record
-      allow create: if request.auth != null && 
-                       request.resource.data.ownerId == request.auth.uid;
-      
-      // Only company owners or admins can update
-      allow update: if request.auth != null && 
-                       (resource.data.ownerId == request.auth.uid || isAdmin());
-      
-      // Only admins can delete companies
-      allow delete: if request.auth != null && isAdmin();
+      allow read: if isSignedIn() &&
+                     (resource.data.ownerId == request.auth.uid || isPlatformAdmin());
+
+      allow create: if isSignedIn() &&
+                       request.resource.data.ownerId == request.auth.uid &&
+                       ownsCompanyId(request.resource.data.companyId);
+
+      allow update: if isSignedIn() &&
+                       resource.data.ownerId == request.auth.uid &&
+                       request.resource.data.ownerId == request.auth.uid &&
+                       request.resource.data.companyId == resource.data.companyId;
+
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
     }
-    
-    // ============================================
-    // USERS COLLECTION (Legacy/App Functionality)
-    // ============================================
+
+    // ---------------------------------------------------------------------
+    // USERS (account + workspace ids)
+    // ---------------------------------------------------------------------
     match /users/{userId} {
-      // Users can read their own data
-      allow read: if request.auth != null && request.auth.uid == userId;
-      
-      // Admins can read all user data
-      allow read: if request.auth != null && isAdmin();
-      
-      // Users can create/update their own profile
-      allow create: if request.auth != null && request.auth.uid == userId;
-      allow update: if request.auth != null && request.auth.uid == userId;
-      
-      // Admins can update any user profile
-      allow update: if request.auth != null && isAdmin();
+      // Only the account owner (and a platform admin) can read a user document.
+      // Company admins must not be able to read other companies' accounts.
+      allow read: if isSelf(userId) || isPlatformAdmin();
+
+      // New accounts must use their own verified Google email.
+      allow create: if isSelf(userId) &&
+                       hasVerifiedEmail() &&
+                       request.resource.data.email == request.auth.token.email;
+
+      // Self-service updates may not change the role or email (prevents
+      // privilege escalation). Admin fields are managed by a server.
+      allow update: if isSelf(userId) &&
+                       request.resource.data.designation == resource.data.designation &&
+                       request.resource.data.email == resource.data.email;
+
+      // Account deletion
+      allow delete: if isSelf(userId) || isPlatformAdmin();
     }
-    
-    // ============================================
-    // GOOGLE SHEETS DATA (If stored in Firestore)
-    // ============================================
+
+    // ---------------------------------------------------------------------
+    // GOOGLE SHEETS DATA (legacy mirror)
+    // ---------------------------------------------------------------------
+    // The app stores workspace data in Google Sheets. This collection is not
+    // written by any client, so keep it server-only to avoid a second copy of
+    // company data being exposed.
     match /sheets_data/{document} {
-      // Only authenticated users can read
-      allow read: if request.auth != null;
-      
-      // Only admins can write
-      allow write: if request.auth != null && isAdmin();
+      allow read, write: if isPlatformAdmin();
     }
-    
-    // ============================================
+
+    // ---------------------------------------------------------------------
     // NOTIFICATIONS COLLECTION
-    // ============================================
+    // ---------------------------------------------------------------------
     match /notifications/{notificationId} {
-      // Users can read their own notifications
-      allow read: if request.auth != null && 
-                     resource.data.ToWorkerID == request.auth.uid;
-      
-      // Admins can read all notifications
-      allow read: if request.auth != null && isAdmin();
-      
-      // Only admins can create notifications
-      allow create: if request.auth != null && isAdmin();
-      
-      // Users can update their own notification read status
-      allow update: if request.auth != null && 
-                       request.resource.data.ToWorkerID == request.auth.uid;
+      allow read: if isSignedIn() &&
+                     (resource.data.ToWorkerID == request.auth.uid || isPlatformAdmin());
+
+      // Alerts are written by company admins through Sheets, but keep the
+      // legacy Firestore path locked to the recipient's own company.
+      allow create: if isSignedIn() && isAdmin();
+
+      // Recipients may only change read-state fields, never the target or body.
+      allow update: if isSignedIn() &&
+                       resource.data.ToWorkerID == request.auth.uid &&
+                       request.resource.data.ToWorkerID == resource.data.ToWorkerID &&
+                       request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['read', 'isRead', 'Read', 'readAt', 'updatedAt']);
     }
-    
-    // ============================================
+
+    // ---------------------------------------------------------------------
     // LEAVE REQUESTS COLLECTION
-    // ============================================
+    // ---------------------------------------------------------------------
     match /leave_requests/{requestId} {
-      // Workers can read their own requests
-      allow read: if request.auth != null && 
-                     resource.data.WorkerID == request.auth.uid;
-      
-      // Admins/Managers can read all requests
-      allow read: if request.auth != null && 
-                     (isAdmin() || 
-                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.designation == 'manager');
-      
-      // Workers can create their own requests
-      allow create: if request.auth != null && 
-                       request.resource.data.WorkerID == request.auth.uid;
-      
-      // Admins/Managers can update request status
-      allow update: if request.auth != null && 
-                       (isAdmin() || 
-                        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.designation == 'manager');
+      allow read: if isSignedIn() &&
+                     (resource.data.WorkerID == request.auth.uid ||
+                      isManagerOrAdmin() ||
+                      isPlatformAdmin());
+
+      // A worker can only create a pending request for themselves. They cannot
+      // self-approve by writing Status: approved.
+      allow create: if isSignedIn() &&
+                       request.resource.data.WorkerID == request.auth.uid &&
+                       request.resource.data.Status == 'pending';
+
+      // Managers/admins review the request but must not change whose it is.
+      allow update: if isSignedIn() &&
+                       (isManagerOrAdmin() || isPlatformAdmin()) &&
+                       request.resource.data.WorkerID == resource.data.WorkerID;
+
+      allow delete: if isSignedIn() &&
+                       resource.data.WorkerID == request.auth.uid &&
+                       resource.data.Status == 'pending';
     }
-    
-    // ============================================
+
+    // ---------------------------------------------------------------------
     // CLOCKINGS COLLECTION
-    // ============================================
+    // ---------------------------------------------------------------------
     match /clockings/{clockingId} {
-      // Workers can read their own clockings
-      allow read: if request.auth != null && 
-                     resource.data.WorkerID == request.auth.uid;
-      
-      // Admins/Managers can read all clockings
-      allow read: if request.auth != null && 
-                     (isAdmin() || 
-                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.designation == 'manager');
-      
-      // Only admins can create/update clockings
-      allow create: if request.auth != null && isAdmin();
-      allow update: if request.auth != null && isAdmin();
+      allow read: if isSignedIn() &&
+                     (resource.data.WorkerID == request.auth.uid ||
+                      isManagerOrAdmin() ||
+                      isPlatformAdmin());
+
+      allow create: if isSignedIn() && (isAdmin() || isPlatformAdmin());
+      allow update: if isSignedIn() && (isAdmin() || isPlatformAdmin());
+      allow delete: if isSignedIn() && (isAdmin() || isPlatformAdmin());
     }
-    
-    // ============================================
+
+    // ---------------------------------------------------------------------
     // DRAWER MONEY COLLECTION
-    // ============================================
+    // ---------------------------------------------------------------------
     match /drawer_money/{document} {
-      // Workers can read their own drawer records
-      allow read: if request.auth != null && 
-                     resource.data.WorkerID == request.auth.uid;
-      
-      // Admins/Managers can read all drawer records
-      allow read: if request.auth != null && 
-                     (isAdmin() || 
-                      get(/databases/$(database)/documents/users/$(request.auth.uid)).data.designation == 'manager');
-      
-      // Only admins can write drawer records
-      allow write: if request.auth != null && isAdmin();
+      allow read: if isSignedIn() &&
+                     (resource.data.WorkerID == request.auth.uid ||
+                      isManagerOrAdmin() ||
+                      isPlatformAdmin());
+
+      allow write: if isSignedIn() && (isAdmin() || isPlatformAdmin());
     }
-    
-    // ============================================
-    // ADMIN ONLY COLLECTIONS
-    // ============================================
+
+    // ---------------------------------------------------------------------
+    // PLATFORM-ONLY COLLECTIONS
+    // ---------------------------------------------------------------------
     match /admin_logs/{document} {
-      // Only admins can read/write admin logs
-      allow read, write: if request.auth != null && isAdmin();
+      allow read, write: if isPlatformAdmin();
     }
-    
+
     match /system_settings/{document} {
-      // Only admins can read/write system settings
-      allow read, write: if request.auth != null && isAdmin();
+      allow read, write: if isPlatformAdmin();
     }
   }
 }

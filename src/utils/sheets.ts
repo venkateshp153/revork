@@ -1,4 +1,5 @@
 import {
+  clearCachedAccessToken,
   getGoogleAccessToken,
 } from '@/src/services/googleAuth';
 import {
@@ -84,53 +85,89 @@ export async function fetchSheetValuesRaw(
 }
 
 /**
- * Makes sure the spreadsheet is readable with the public API key by adding
- * an "anyone with the link → viewer" permission. Safe to call repeatedly.
+ * Removes legacy "anyone with the link" permissions from a workspace.
+ *
+ * Older versions of Revork shared every company spreadsheet and folder as
+ * publicly readable so the API key could read them. That exposed names,
+ * phone numbers, pay rates and delivery addresses to anyone who obtained the
+ * sheet id from a join link. New workspaces are private and shared only with
+ * the Google accounts that need them, so this cleanup runs for admins on login
+ * to revoke any permission left behind by an older build.
+ *
+ * Safe to call repeatedly. Returns true when no public permission remains.
  */
-export async function ensurePublicReadAccess(
+export async function removePublicLinkAccess(
   sheetId: string,
   token: string | null
 ): Promise<boolean> {
   if (!sheetId || !token) return false;
 
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
+  const headers = { Authorization: `Bearer ${token}` };
+  let clean = true;
+
+  const stripPublic = async (fileId: string): Promise<void> => {
+    if (!fileId) return;
+    try {
+      const listResponse = await fetch(
+        `${DRIVE_BASE}/${fileId}/permissions?fields=permissions(id,type,role)&supportsAllDrives=true`,
+        { headers }
+      );
+      if (!listResponse.ok) {
+        clean = false;
+        return;
+      }
+      const list = await listResponse.json();
+      const publicPermissions = (list.permissions || []).filter(
+        (permission: any) => permission.type === 'anyone'
+      );
+      for (const permission of publicPermissions) {
+        const deleteResponse = await fetch(
+          `${DRIVE_BASE}/${fileId}/permissions/${encodeURIComponent(
+            permission.id
+          )}?supportsAllDrives=true`,
+          { method: 'DELETE', headers }
+        );
+        if (!deleteResponse.ok && deleteResponse.status !== 404) {
+          clean = false;
+          const body = await deleteResponse.text().catch(() => '');
+          console.warn(
+            '[Sheets] Could not revoke public access:',
+            deleteResponse.status,
+            body
+          );
+        }
+      }
+      if (publicPermissions.length > 0) {
+        console.log('[Sheets] Revoked public link access for', fileId);
+      }
+    } catch (error) {
+      clean = false;
+      console.warn('[Sheets] Public access cleanup failed:', error);
+    }
   };
 
   try {
-    const listResponse = await fetch(
-      `${DRIVE_BASE}/${sheetId}/permissions?fields=permissions(id,type,role)`,
-      { headers }
-    );
-    if (listResponse.ok) {
-      const list = await listResponse.json();
-      const isPublic = (list.permissions || []).some(
-        (permission: any) =>
-          permission.type === 'anyone' &&
-          (permission.role === 'reader' || permission.role === 'writer')
+    await stripPublic(sheetId);
+
+    // A folder can also carry an inherited "anyone" permission, so clean the
+    // parent folder as well.
+    try {
+      const info = await fetch(
+        `${DRIVE_BASE}/${sheetId}?fields=parents&supportsAllDrives=true`,
+        { headers }
       );
-      if (isPublic) return true;
+      if (info.ok) {
+        const data = await info.json().catch(() => null);
+        const parentId = Array.isArray(data?.parents) ? data.parents[0] : '';
+        if (parentId) await stripPublic(parentId);
+      }
+    } catch {
+      // Best effort: the sheet itself is the important part.
     }
 
-    const shareResponse = await fetch(`${DRIVE_BASE}/${sheetId}/permissions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ type: 'anyone', role: 'reader' }),
-    });
-    if (shareResponse.ok) {
-      console.log('[Sheets] Public read access enabled for', sheetId);
-      return true;
-    }
-    const body = await shareResponse.text().catch(() => '');
-    console.warn(
-      '[Sheets] Could not enable public read access:',
-      shareResponse.status,
-      body
-    );
-    return false;
+    return clean;
   } catch (error) {
-    console.warn('[Sheets] Public access check failed:', error);
+    console.warn('[Sheets] Public access cleanup failed:', error);
     return false;
   }
 }
@@ -152,16 +189,24 @@ function describeSheetAccessError(sheetName: string, error: any): string {
     return (
       `Google is blocking the app's API key for “${sheetName}” (${reason})${detail}. ` +
       'In Google Cloud Console → APIs & Services, enable the Google Sheets API ' +
-      'and Google Drive API, then open Credentials → the API key used by ' +
-      'EXPO_PUBLIC_API_KEY and either add both APIs to its allowed list or ' +
-      'choose “Don’t restrict key”.'
+      'and Google Drive API, then open Credentials → the key used by ' +
+      'EXPO_PUBLIC_API_KEY and add both APIs to its allowed list. Keep the key ' +
+      'restricted to the Android app and its release SHA-1 — never leave it ' +
+      'unrestricted.'
     );
   }
 
   return (
-    `${sheetName} is not readable. Ask the admin to share the workspace spreadsheet as “Anyone with the link · Viewer”, or sign in with the company Google account.`
+    `${sheetName} is not readable. Ask the admin to share the workspace spreadsheet with your Google account (Viewer or Editor) in Google Drive, then sign in with that account. Workspace files are private and are no longer shared publicly.`
   );
 }
+
+/**
+ * Sheets that already rejected the anonymous API-key read. Skipping the API-key
+ * retry for the rest of the session avoids a guaranteed 403 on every read now
+ * that workspaces are private.
+ */
+const privateSheets = new Set<string>();
 
 /**
  * Reads a sheet with offline support: successful network reads refresh the
@@ -172,30 +217,59 @@ export async function fetchSheetValues(
   sheetName: string
 ): Promise<string[][]> {
   try {
-    let values: string[][];
-    try {
-      values = await fetchSheetValuesRaw(sheetId, sheetName);
-    } catch (readError: any) {
-      if (readError?.status !== 401 && readError?.status !== 403) throw readError;
+    let values: string[][] | null = null;
+    let lastError: any = null;
 
-      // The public (API key) read was rejected. Signed-in admins/managers have
-      // a Google session, so read with their OAuth token first — it bypasses
-      // API-key restrictions and works on private spreadsheets.
+    // Workspace spreadsheets are private. Try the anonymous API-key read only
+    // once per sheet (for any legacy workspace that is still public), then use
+    // the signed-in user's OAuth token for every subsequent read.
+    if (API_KEY && !privateSheets.has(sheetId)) {
+      try {
+        values = await fetchSheetValuesRaw(sheetId, sheetName);
+      } catch (readError: any) {
+        lastError = readError;
+        if (readError?.status === 401 || readError?.status === 403) {
+          privateSheets.add(sheetId);
+        } else {
+          throw readError;
+        }
+      }
+    }
+
+    if (!values) {
       const token = await getGoogleAccessToken(false);
-      if (!token) throw readError;
+      if (!token) {
+        if (lastError?.status === 401 || lastError?.status === 403) {
+          throw new Error(describeSheetAccessError(sheetName, lastError));
+        }
+        throw new Error(
+          `Sign in with Google to read “${sheetName}”, or ask your admin to share the workspace with your Google account.`
+        );
+      }
 
       try {
         values = await fetchSheetValuesRaw(sheetId, sheetName, token);
       } catch (tokenError: any) {
-        // The account could not read it either. Try to repair the public
-        // "anyone with the link" permission, then retry anonymously.
-        await ensurePublicReadAccess(sheetId, token);
-        try {
-          values = await fetchSheetValuesRaw(sheetId, sheetName);
-        } catch (retryError: any) {
-          throw retryError || tokenError;
+        lastError = tokenError;
+        if (tokenError?.status === 401) {
+          // A revoked/expired cached token: drop it and retry once.
+          clearCachedAccessToken();
+          const fresh = await getGoogleAccessToken(false);
+          if (fresh) {
+            try {
+              values = await fetchSheetValuesRaw(sheetId, sheetName, fresh);
+            } catch (retryError: any) {
+              lastError = retryError;
+            }
+          }
         }
       }
+    }
+
+    if (!values) {
+      throw lastError?.status
+        ? new Error(describeSheetAccessError(sheetName, lastError))
+        : lastError || new Error(`Could not read ${sheetName}`);
     }
 
     const pending = (await getPendingMutations()).filter(

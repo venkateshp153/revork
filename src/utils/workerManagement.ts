@@ -293,6 +293,79 @@ async function shareCompanyFolderWithWorker(
   }
 }
 
+/**
+ * Removes a worker's per-account Drive access to the spreadsheet and folder.
+ *
+ * Join links only carry ids, so the real access control is the worker's Google
+ * account permission. Deleting that permission is what actually invalidates the
+ * link for someone who already has it.
+ */
+export async function removeWorkerDriveAccess(
+  sheetId: string,
+  token: string,
+  email: string
+): Promise<{ removed: boolean; error?: string }> {
+  const normalized = (email || '').trim().toLowerCase();
+  if (!sheetId || !token || !normalized) {
+    return { removed: false, error: 'Missing sheet or worker email' };
+  }
+
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const removeFrom = async (fileId: string): Promise<boolean> => {
+    const list = await requestJson<{
+      permissions?: { id: string; emailAddress?: string; type?: string }[];
+    }>(
+      `${DRIVE_BASE}/${fileId}/permissions?fields=permissions(id,emailAddress,type)&supportsAllDrives=true`,
+      { headers }
+    );
+
+    const existing = (list.permissions || []).find(
+      (permission) =>
+        permission.type === 'user' &&
+        permission.emailAddress?.trim().toLowerCase() === normalized
+    );
+    if (!existing) return true;
+
+    const response = await fetch(
+      `${DRIVE_BASE}/${fileId}/permissions/${encodeURIComponent(
+        existing.id
+      )}?supportsAllDrives=true`,
+      { method: 'DELETE', headers }
+    );
+    return response.ok || response.status === 404;
+  };
+
+  try {
+    const sheetRemoved = await removeFrom(sheetId);
+    if (!sheetRemoved) {
+      return { removed: false, error: 'Google refused to remove sheet access' };
+    }
+
+    // Best effort: the folder holds proof photos, so remove it too.
+    try {
+      const info = await fetch(
+        `${DRIVE_BASE}/${sheetId}?fields=parents&supportsAllDrives=true`,
+        { headers }
+      );
+      if (info.ok) {
+        const data = await info.json().catch(() => null);
+        const parentId = Array.isArray(data?.parents) ? data.parents[0] : '';
+        if (parentId) await removeFrom(parentId);
+      }
+    } catch {
+      // The sheet permission is the important one.
+    }
+
+    return { removed: true };
+  } catch (error: any) {
+    return {
+      removed: false,
+      error: error?.message || 'Drive permission removal failed',
+    };
+  }
+}
+
 /** Ensures the worker has viewer access (legacy helper). */
 export async function ensureWorkerReadAccess(
   sheetId: string,

@@ -38,6 +38,7 @@ export default function RootLayout() {
           <Stack.Screen name="delivery-settings" options={{ headerShown: false }} />
           <Stack.Screen name="delivery-locations" options={{ headerShown: false }} />
           <Stack.Screen name="delivery-team" options={{ headerShown: false }} />
+          <Stack.Screen name="privacy-policy" options={{ headerShown: false }} />
         </Stack>
       </ErrorBoundary>
     </ReduxProvider>

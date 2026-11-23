@@ -17,9 +17,13 @@ import { useSelector } from 'react-redux';
 import * as Clipboard from 'expo-clipboard';
 import * as Linking from 'expo-linking';
 import { RootState } from '@/redux/store';
-import { getGoogleAccessToken, ensurePublicReadAccess } from '@/src/utils/sheets';
+import { getGoogleAccessToken } from '@/src/utils/sheets';
 import { buildWorkerJoinLink } from '@/src/utils/joinLink';
-import { addWorkerToSheet, ensureWorkerEditAccess } from '@/src/utils/workerManagement';
+import {
+  addWorkerToSheet,
+  ensureWorkerEditAccess,
+  removeWorkerDriveAccess,
+} from '@/src/utils/workerManagement';
 
 
 // LayoutAnimation is enabled by default under the New Architecture (Fabric)
@@ -115,9 +119,8 @@ export default function GenerateJoinLinkModal({ visible, onClose }: GenerateJoin
       });
       setWorkerId(savedWorkerId);
 
-      // Bind read access to the worker's own Google account so the link keeps
-      // working even if the workspace is no longer shared publicly.
-      await ensurePublicReadAccess(sheetId, token);
+      // Bind access to the worker's own Google account. The workspace is never
+      // shared publicly, so only this email can open the sheet.
       const access = await ensureWorkerEditAccess(
         sheetId,
         token,
@@ -164,17 +167,47 @@ export default function GenerateJoinLinkModal({ visible, onClose }: GenerateJoin
 
   const handleRevokeRegenerate = () => {
     Alert.alert(
-      'Revoke & Regenerate',
-      'This will invalidate the current join link for all pending workers. Continue?',
+      'Revoke access?',
+      `This removes ${workerEmail || 'this worker'}'s Google Drive access to the workspace, so the link stops working for them. Continue?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Yes, Regenerate',
+          text: 'Revoke access',
           style: 'destructive',
-          onPress: () => {
-            setGeneratedLink('');
-            setStep(1);
-            Alert.alert('Done', 'The old link is now invalid. Generate a new link to share.');
+          onPress: async () => {
+            if (!sheetId || !workerEmail.trim()) {
+              setGeneratedLink('');
+              setStep(1);
+              return;
+            }
+            setLoading(true);
+            try {
+              const token = await getGoogleAccessToken(true);
+              if (!token) {
+                throw new Error('Sign in with Google to revoke access.');
+              }
+              const result = await removeWorkerDriveAccess(
+                sheetId,
+                token,
+                workerEmail
+              );
+              if (!result.removed) {
+                throw new Error(result.error || 'Google did not remove access.');
+              }
+              setGeneratedLink('');
+              setStep(1);
+              Alert.alert(
+                'Access revoked',
+                `${workerEmail.trim()} can no longer open this workspace. Generate a new link to invite them again.`
+              );
+            } catch (error: any) {
+              Alert.alert(
+                'Could not revoke access',
+                error?.message || 'Try again.'
+              );
+            } finally {
+              setLoading(false);
+            }
           },
         },
       ]

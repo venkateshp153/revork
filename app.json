@@ -16,6 +16,19 @@
       "package": "com.venky534.revork",
       "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.REQUEST_INSTALL_PACKAGES",
+        "android.permission.MANAGE_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_SMS",
+        "android.permission.RECEIVE_SMS",
+        "android.permission.SEND_SMS",
+        "android.permission.READ_CALL_LOG",
+        "android.permission.WRITE_CALL_LOG",
+        "android.permission.PROCESS_OUTGOING_CALLS"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -64,7 +77,8 @@
         "expo-image-picker",
         {
           "photosPermission": "Allow Revork to attach delivery proof photos and scan address lists from your gallery.",
-          "cameraPermission": "Allow Revork to take delivery proof photos and scan address lists."
+          "cameraPermission": "Allow Revork to take delivery proof photos and scan address lists.",
+          "microphonePermission": false
         }
       ],
       "expo-font",

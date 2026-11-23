@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   Image,
-  Linking,
   Modal,
   Share,
   StyleSheet,
@@ -10,6 +9,7 @@ import {
   View,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { openSafeHttpsUrl } from '@/src/utils/safeUrl';
 
 export interface ViewerPhoto {
   uri: string;
@@ -96,7 +96,15 @@ export default function PhotoViewerModal({
               <TouchableOpacity
                 style={styles.actionButton}
                 onPress={() => {
-                  if (photo?.driveUrl) void Linking.openURL(photo.driveUrl);
+                  if (photo?.driveUrl) {
+                    void openSafeHttpsUrl(photo.driveUrl, {
+                      hosts: [
+                        'drive.google.com',
+                        'docs.google.com',
+                        'lh3.googleusercontent.com',
+                      ],
+                    });
+                  }
                 }}
               >
                 <MaterialCommunityIcons

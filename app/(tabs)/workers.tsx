@@ -9,7 +9,6 @@ import {
   ActivityIndicator,
   TextInput,
   Alert,
-  Linking,
   Image,
   Share,
 } from 'react-native';
@@ -23,7 +22,7 @@ import { getRoleTheme } from '@/assets/constants/roleTheme';
 import {
   fetchSheetRows,
   getGoogleAccessToken,
-  ensurePublicReadAccess,
+  removePublicLinkAccess,
   type SheetRow,
 } from '@/src/utils/sheets';
 import {
@@ -37,6 +36,7 @@ import {
   updateWorkerFields,
 } from '@/src/utils/workerManagement';
 import { localDateString } from '@/src/utils/attendance';
+import { openEmailAddress, openPhoneNumber } from '@/src/utils/safeUrl';
 import { buildWorkerJoinLink } from '@/src/utils/joinLink';
 import { findExistingWorkspaceSheet } from '@/src/utils/workspace';
 import DesignationDropdown from '@/components/DesignationDropdown';
@@ -397,8 +397,10 @@ export default function WorkersScreen() {
         return;
       }
 
-      // 3. Keep public link access working as a fallback for older installs.
-      await ensurePublicReadAccess(activeSheetId, token);
+      // 3. Remove any legacy public link sharing left by an older build. The
+      //    worker already has per-account access above, so nothing else needs
+      //    the sheet to be public.
+      await removePublicLinkAccess(activeSheetId, token);
 
       const link = buildWorkerJoinLink({
         sheetId: activeSheetId,
@@ -470,7 +472,7 @@ export default function WorkersScreen() {
               {!!item.Phone && (
                 <TouchableOpacity
                   style={styles.contactChip}
-                  onPress={() => Linking.openURL(`tel:${item.Phone}`)}
+                  onPress={() => void openPhoneNumber(item.Phone)}
                 >
                   <MaterialCommunityIcons name="phone" size={12} color={theme.accent} />
                   <Text style={styles.contactChipText}>{item.Phone}</Text>
@@ -479,7 +481,7 @@ export default function WorkersScreen() {
               {!!item.Email && (
                 <TouchableOpacity
                   style={styles.contactChip}
-                  onPress={() => Linking.openURL(`mailto:${item.Email}`)}
+                  onPress={() => void openEmailAddress(item.Email)}
                 >
                   <MaterialCommunityIcons name="email" size={12} color={theme.accent} />
                   <Text style={styles.contactChipText} numberOfLines={1}>

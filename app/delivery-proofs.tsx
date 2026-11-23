@@ -3,7 +3,6 @@ import {
   ActivityIndicator,
   Alert,
   Image,
-  Linking,
   Modal,
   RefreshControl,
   ScrollView,
@@ -36,6 +35,9 @@ import {
   type DriveProofFile,
 } from '@/src/utils/deliveryPhotos';
 import { localDateStamp } from '@/src/utils/deliveryLog';
+import { openSafeHttpsUrl } from '@/src/utils/safeUrl';
+
+const DRIVE_HOSTS = ['drive.google.com'];
 
 function formatDateLabel(date: string): string {
   const parsed = new Date(`${date}T12:00:00`);
@@ -877,7 +879,7 @@ export default function DeliveryProofsScreen() {
               {!!folderUrl && (
                 <TouchableOpacity
                   onPress={() => {
-                    void Linking.openURL(folderUrl);
+                    void openSafeHttpsUrl(folderUrl, { hosts: DRIVE_HOSTS });
                   }}
                 >
                   <Text style={styles.folderLink}>Open Drive folder</Text>
@@ -1051,7 +1053,9 @@ export default function DeliveryProofsScreen() {
                       {!!folderUrl && (
                         <TouchableOpacity
                           onPress={() => {
-                            void Linking.openURL(folderUrl);
+                            void openSafeHttpsUrl(folderUrl, {
+                              hosts: DRIVE_HOSTS,
+                            });
                           }}
                         >
                           <Text style={styles.folderLink}>

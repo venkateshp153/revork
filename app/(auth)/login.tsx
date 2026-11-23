@@ -23,8 +23,9 @@ import { findAnyWorkspaceFolder, findFolderByName, findSheetInFolder } from '@/s
 import { createGoogleDriveStructure } from '@/src/utils/createGoogleDriveStructure';
 import { signInWithGoogle, checkOrCreateUser, saveWorkerToTracking, updateCompanyTracking, updateUserDriveFolder } from '@/assets/services/firebaseService';
 import { ensureAdminWorkerRow } from '@/src/utils/workerManagement';
-import { ensurePublicReadAccess } from '@/src/utils/sheets';
+import { removePublicLinkAccess } from '@/src/utils/sheets';
 import {
+  clearGoogleSession,
   resolveGoogleEmail,
   signInWithGoogleWorkspace,
 } from '@/src/services/googleAuth';
@@ -82,11 +83,6 @@ export default function LoginScreen() {
   const [fetchedWorkerData, setFetchedWorkerData] = useState<any>(null);
   const [fetchedWorkerCandidates, setFetchedWorkerCandidates] = useState<any[]>([]);
   const [verifiedGoogleEmail, setVerifiedGoogleEmail] = useState('');
-  const [pendingJoin, setPendingJoin] = useState<{
-    sheetId: string;
-    companyId: string;
-    workerId: string;
-  } | null>(null);
   const [inlineError, setInlineError] = useState('');
   // Popup shown while logging in a returning (already registered) account
   const [existingAccountPopup, setExistingAccountPopup] = useState(false);
@@ -139,7 +135,6 @@ export default function LoginScreen() {
       const { sheetId, companyId } = link;
       let resolvedSheetId = sheetId;
 
-      const apiKey = process.env.EXPO_PUBLIC_API_KEY || '';
       const workersUrlFor = (id: string) =>
         `https://sheets.googleapis.com/v4/spreadsheets/${id}/values/Workers`;
 
@@ -163,20 +158,19 @@ export default function LoginScreen() {
         '';
       let googleScopes: string[] = chosenAccount.scopes || [];
 
-      const readWorkers = (id: string, token: string | null) =>
-        fetch(
-          token ? workersUrlFor(id) : `${workersUrlFor(id)}?key=${apiKey}`,
-          token ? { headers: { Authorization: `Bearer ${token}` } } : undefined
-        );
+      // Workspaces are private, so the worker's own OAuth token is the only way
+      // to read the sheet. A join link alone does not grant access.
+      const readWorkers = (id: string, token: string) =>
+        fetch(workersUrlFor(id), {
+          headers: { Authorization: `Bearer ${token}` },
+        });
 
-      // 2. Prefer the worker's OAuth token. Fall back to the public API key,
-      //    then to a fresh account choice if the first account cannot read it.
-      let response: Response | null = googleToken
-        ? await readWorkers(resolvedSheetId, googleToken)
-        : null;
-      if ((!response || !response.ok) && apiKey) {
-        response = await readWorkers(resolvedSheetId, null);
-      }
+      // 2. Read with the chosen account, then fall back to a fresh account
+      //    choice if this account has not been shared the sheet.
+      let response: Response | null = await readWorkers(
+        resolvedSheetId,
+        googleToken
+      );
 
       // A 403/404 often means the opaque id was copied with a visual mistake
       // (0 vs O, 1 vs l/I). Try those variants BEFORE prompting for another
@@ -187,12 +181,7 @@ export default function LoginScreen() {
       ) {
         for (const candidate of sheetIdVariants(resolvedSheetId)) {
           if (candidate === resolvedSheetId) continue;
-          let candidateResponse: Response | null = googleToken
-            ? await readWorkers(candidate, googleToken)
-            : null;
-          if ((!candidateResponse || !candidateResponse.ok) && apiKey) {
-            candidateResponse = await readWorkers(candidate, null);
-          }
+          const candidateResponse = await readWorkers(candidate, googleToken);
           if (candidateResponse?.ok) {
             resolvedSheetId = candidate;
             response = candidateResponse;
@@ -251,22 +240,9 @@ export default function LoginScreen() {
 
       const data = await response.json();
 
-      setPendingJoin({
-        sheetId: resolvedSheetId,
-        companyId: companyId || '',
-        workerId: link.workerId || '',
-      });
-
-      const showEmptyVerify = () => {
-        setFetchedWorkerCandidates([]);
-        setFetchedWorkerData(null);
-        setVerifiedGoogleEmail(googleEmail);
-        setWorkerVerifyVisible(true);
-      };
-
       if (!data.values || data.values.length === 0) {
-        // No workers in the sheet: still let the user fill in their details.
-        showEmptyVerify();
+        setInlineError('Link not recognized or expired. Ask your admin for a new link.');
+        setLoading(false);
         return;
       }
 
@@ -296,9 +272,8 @@ export default function LoginScreen() {
         : [];
 
       if (matches.length === 0) {
-        // The link format is valid but the worker row is missing. Show the
-        // verify modal with empty inputs instead of stopping the flow.
-        showEmptyVerify();
+        setInlineError('Link not recognized or expired. Ask your admin for a new link.');
+        setLoading(false);
         return;
       }
 
@@ -325,14 +300,32 @@ export default function LoginScreen() {
         return;
       }
 
-      // Prefer the row for the Google account that was selected, but still use
-      // the matched worker row if another Gmail account was chosen.
+      // Security: the selected Google account must match the email the admin
+      // shared for this worker. A join link alone is not enough.
       const normalizedGoogleEmail = googleEmail.trim().toLowerCase();
       const emailMatches = usableMatches.filter(
         (row) => valueOf(row, 'Email').toLowerCase() === normalizedGoogleEmail
       );
-      const finalMatches =
-        emailMatches.length > 0 ? emailMatches : usableMatches;
+
+      if (emailMatches.length === 0) {
+        const sharedEmails = Array.from(
+          new Set(
+            usableMatches
+              .map((row) => valueOf(row, 'Email').toLowerCase())
+              .filter(Boolean)
+          )
+        );
+        await clearGoogleSession().catch(() => {});
+        setInlineError(
+          `You signed in as ${normalizedGoogleEmail}, but this link belongs to ${
+            sharedEmails.join(' or ') || 'another email'
+          }. Tap Join again and choose that Google account.`
+        );
+        setLoading(false);
+        return;
+      }
+
+      const finalMatches = emailMatches;
 
       console.log(
         '[JoinLink] Access OK → google:',
@@ -373,33 +366,11 @@ export default function LoginScreen() {
       value.trim().replace(/\s+/g, ' ').toLowerCase();
     const digitsOnly = (value: string) => (value || '').replace(/\D/g, '');
 
-    // No worker row was found for this link: let the employee join with the
-    // details they entered in the modal.
     if (fetchedWorkerCandidates.length === 0 && !fetchedWorkerData) {
-      const fallbackWorkerId =
-        pendingJoin?.workerId ||
-        `WORKER-${Date.now().toString(36).slice(-6).toUpperCase()}`;
-      const fallback = {
-        workerId: fallbackWorkerId,
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        phone: digitsOnly(phone),
-        payPerHour: 0,
-        designation: 'worker' as const,
-        companyName: 'Company',
-        sheetId: pendingJoin?.sheetId || '',
-        companyId: pendingJoin?.companyId || '',
-      };
-      dispatch(setWorkerProfile(fallback));
-      void saveWorkerToTracking({
-        workerId: fallback.workerId,
-        name: fallback.name,
-        email: fallback.email,
-        phone: fallback.phone,
-        companyId: fallback.companyId,
-        sheetId: fallback.sheetId,
-      });
-      router.replace('/(tabs)/home');
+      Alert.alert(
+        'Link not recognized',
+        'This join link is no longer valid. Ask your admin for a new link.'
+      );
       return;
     }
 
@@ -609,7 +580,9 @@ export default function LoginScreen() {
           resolvedSheetId &&
           (userData.designation === 'admin' || !userData.designation)
         ) {
-          await ensurePublicReadAccess(resolvedSheetId, accessToken);
+          // Revoke any legacy "anyone with the link" permission left behind
+          // by an older build so the company data is private from now on.
+          await removePublicLinkAccess(resolvedSheetId, accessToken);
           await ensureAdminWorkerRow(resolvedSheetId, accessToken, {
             uid: userData.uid,
             name: userData.name,

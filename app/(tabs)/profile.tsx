@@ -9,7 +9,6 @@ import {
   TextInput,
   ActivityIndicator,
   RefreshControl,
-  Linking,
 } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useDispatch, useSelector } from 'react-redux';
@@ -25,7 +24,20 @@ import {
 import {
   signOutUser,
   updateUserProfileFields,
+  auth,
+  db,
 } from '@/assets/services/firebaseService';
+import { deleteUser } from 'firebase/auth';
+import { clearGoogleSession } from '@/src/services/googleAuth';
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  query,
+  where,
+} from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getRoleTheme } from '@/assets/constants/roleTheme';
 import {
   fetchSheetRows,
@@ -39,7 +51,10 @@ import {
   updateWorkerFields,
 } from '@/src/utils/workerManagement';
 import { notifyAdminOfEdit } from '@/src/utils/editAccess';
+import { openSafeHttpsUrl } from '@/src/utils/safeUrl';
 import GenerateJoinLinkModal from '@/components/GenerateJoinLinkModal';
+
+const PRIVACY_URL = process.env.EXPO_PUBLIC_PRIVACY_URL || '';
 
 export default function ProfileScreen() {
   const dispatch = useDispatch();
@@ -56,6 +71,7 @@ export default function ProfileScreen() {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
   const [joinLinkVisible, setJoinLinkVisible] = useState(false);
 
   const [name, setNameValue] = useState(user.name || '');
@@ -162,6 +178,71 @@ export default function ProfileScreen() {
     ]);
   };
 
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete your account?',
+      'This permanently deletes your personal profile and sign-in. Company workspace files (Google Sheets/Drive) are owned by the company and are not deleted. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete account',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingAccount(true);
+            try {
+              const current = auth.currentUser;
+              if (!current) throw new Error('You are not signed in.');
+              const uid = current.uid;
+              const email = (current.email || user.email || '').toLowerCase();
+
+              // Remove personal Firestore records first.
+              await Promise.all([
+                deleteDoc(doc(db, 'users', uid)).catch(() => {}),
+                deleteDoc(doc(db, 'user_tracking', uid)).catch(() => {}),
+              ]);
+
+              if (email) {
+                const tracking = await getDocs(
+                  query(
+                    collection(db, 'worker_tracking'),
+                    where('email', '==', email)
+                  )
+                ).catch(() => null);
+                if (tracking) {
+                  await Promise.all(
+                    tracking.docs.map((item) =>
+                      deleteDoc(item.ref).catch(() => {})
+                    )
+                  );
+                }
+              }
+
+              // Delete the Firebase Auth account last.
+              await deleteUser(current);
+
+              // Drop the native Google session and any cached OAuth token so
+              // the deleted account cannot be silently reused.
+              await clearGoogleSession().catch(() => {});
+              await AsyncStorage.clear().catch(() => {});
+              dispatch(logout());
+              router.replace('/(auth)/login');
+            } catch (error: any) {
+              Alert.alert(
+                'Could not delete account',
+                error?.code === 'auth/requires-recent-login'
+                  ? 'For your security, please sign out, sign in again, and then delete your account.'
+                  : error?.message ||
+                      'Sign in again and retry. If this keeps happening, contact support.'
+              );
+            } finally {
+              setDeletingAccount(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleCopyWorkspace = async () => {
     if (!sheetId) {
       Alert.alert('No workspace', 'No spreadsheet is linked to this account.');
@@ -172,6 +253,14 @@ export default function ProfileScreen() {
       `https://docs.google.com/spreadsheets/d/${sheetId}`;
     await Clipboard.setStringAsync(link);
     Alert.alert('Copied', 'Spreadsheet link copied to clipboard.');
+  };
+
+  const handleOpenPrivacy = () => {
+    if (PRIVACY_URL) {
+      void openSafeHttpsUrl(PRIVACY_URL);
+      return;
+    }
+    router.push('/privacy-policy' as any);
   };
 
   const handleOpenFolder = async () => {
@@ -187,9 +276,10 @@ export default function ProfileScreen() {
       );
       return;
     }
-    try {
-      await Linking.openURL(link);
-    } catch {
+    const opened = await openSafeHttpsUrl(link, {
+      hosts: ['drive.google.com', 'docs.google.com'],
+    });
+    if (!opened) {
       Alert.alert('Unable to open Drive', 'Please try again.');
     }
   };
@@ -618,6 +708,44 @@ export default function ProfileScreen() {
         </View>
       )}
 
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Privacy & account</Text>
+        <View style={styles.card}>
+          <TouchableOpacity
+            style={styles.deleteAccountButton}
+            onPress={handleDeleteAccount}
+            disabled={deletingAccount}
+          >
+            {deletingAccount ? (
+              <ActivityIndicator color="#DC2626" />
+            ) : (
+              <>
+                <MaterialCommunityIcons
+                  name="account-remove-outline"
+                  size={19}
+                  color="#DC2626"
+                />
+                <Text style={styles.deleteAccountText}>Delete my account</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          <Text style={styles.deleteAccountHint}>
+            Deletes your personal profile and sign-in. Company workspace files
+            remain with the company admin.
+          </Text>
+          <TouchableOpacity style={styles.privacyLink} onPress={handleOpenPrivacy}>
+            <MaterialCommunityIcons
+              name="shield-lock-outline"
+              size={15}
+              color={theme.accent}
+            />
+            <Text style={[styles.privacyLinkText, { color: theme.accent }]}>
+              Privacy policy
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
       <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
         <MaterialCommunityIcons name="logout" size={20} color="#DC2626" />
         <Text style={styles.logoutText}>Logout</Text>
@@ -842,6 +970,41 @@ const styles = StyleSheet.create({
   toolInfo: { flex: 1, marginLeft: 10 },
   toolTitle: { fontSize: 13, fontWeight: '700', color: '#1E293B' },
   toolSubtitle: { fontSize: 10, color: '#64748B', marginTop: 2 },
+  deleteAccountButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    backgroundColor: '#FEF2F2',
+    borderRadius: 10,
+    paddingVertical: 11,
+  },
+  deleteAccountText: {
+    color: '#DC2626',
+    fontSize: 12.5,
+    fontWeight: '800',
+    marginLeft: 6,
+  },
+  deleteAccountHint: {
+    fontSize: 10,
+    color: '#94A3B8',
+    lineHeight: 15,
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  privacyLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 10,
+    paddingVertical: 6,
+  },
+  privacyLinkText: {
+    fontSize: 11.5,
+    fontWeight: '800',
+    marginLeft: 5,
+  },
   logoutButton: {
     flexDirection: 'row',
     alignItems: 'center',

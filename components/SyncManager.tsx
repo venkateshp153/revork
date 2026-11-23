@@ -12,13 +12,13 @@ import {
 } from '@/src/utils/deliveryPhotos';
 import { readCompanySettings } from '@/src/utils/settings';
 import {
-  ensurePublicReadAccess,
   getGoogleAccessToken,
+  removePublicLinkAccess,
 } from '@/src/utils/sheets';
 
 /**
- * Flushes the offline queue automatically and keeps the admin workspace
- * publicly readable (API-key reads) without requiring a re-login.
+ * Flushes the offline queue automatically, and for admins revokes any legacy
+ * "anyone with the link" permission so a workspace is never left public.
  *
  * It also drains queued delivery proof photos to Google Drive as soon as the
  * device gets a connection, so drivers can work in dead zones without thinking
@@ -55,7 +55,7 @@ export default function SyncManager() {
       try {
         const token = await getGoogleAccessToken(false);
         if (token && !cancelled) {
-          await ensurePublicReadAccess(sheetId, token);
+          await removePublicLinkAccess(sheetId, token);
         }
       } catch {
         // retried on the next foreground event
