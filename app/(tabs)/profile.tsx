@@ -27,7 +27,7 @@ import {
   auth,
   db,
 } from '@/assets/services/firebaseService';
-import { deleteUser } from 'firebase/auth';
+import { deleteUser, signOut } from 'firebase/auth';
 import { clearGoogleSession } from '@/src/services/googleAuth';
 import {
   collection,
@@ -219,6 +219,10 @@ export default function ProfileScreen() {
 
               // Delete the Firebase Auth account last.
               await deleteUser(current);
+
+              // Drop the persisted session from the keystore too — clearing
+              // AsyncStorage below no longer covers it.
+              await signOut(auth).catch(() => {});
 
               // Drop the native Google session and any cached OAuth token so
               // the deleted account cannot be silently reused.

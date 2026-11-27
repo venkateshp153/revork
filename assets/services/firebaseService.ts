@@ -11,6 +11,7 @@ import {
 } from 'firebase/auth';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { secureStorage } from '@/src/services/secureStorage';
 import { getFirestore, doc, getDoc, setDoc, collection, addDoc, query, where, getDocs, updateDoc } from 'firebase/firestore';
 import { GoogleSignin, statusCodes } from '@react-native-google-signin/google-signin';
 import {
@@ -47,9 +48,11 @@ if (Platform.OS === 'web') {
   auth = getAuth(app);
 } else {
   try {
-    // Persist auth state across sessions (fixes "memory persistence" warning)
+    // Persist auth state across sessions (fixes "memory persistence" warning).
+    // secureStorage keeps the refresh token in the OS keystore instead of the
+    // plain-text AsyncStorage record, falling back to AsyncStorage on web.
     auth = initializeAuth(app, {
-      persistence: getReactNativePersistence(AsyncStorage),
+      persistence: getReactNativePersistence(secureStorage),
     });
   } catch {
     // initializeAuth throws if auth was already initialized (e.g. hot reload)
